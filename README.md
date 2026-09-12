@@ -251,6 +251,72 @@ fp inject --target your_app --script fridapilot/templates/linux/comprehensive.js
 
 ---
 
+## 加固绕过脚本
+
+每个平台除了通用逆向脚本外，还提供针对常见加固方案的绕过脚本（`hardening_bypass.js`）。
+
+### Android 加固绕过
+
+```bash
+fp inject --target com.example.app --script fridapilot/templates/android/hardening_bypass.js --device usb
+```
+
+| 加固方案 | 绕过方式 |
+|---------|---------|
+| **360 加固** | 检测 libjiagu.so，拦截 pthread_create 阻止反调试线程 |
+| **腾讯乐固 (Legu)** | 检测 libshella-*.so，标记加固类型 |
+| **梆梆加固** | 检测 libsecexe.so / libDexHelper.so |
+| **通用壳** | Hook DexClassLoader / InMemoryDexClassLoader / DexFile.loadDex 捕获解壳后的 DEX |
+| **反调试** | TracerPid 检测、ptrace 绕过、exit() 拦截 |
+| **Frida 检测** | strstr 隐藏 frida 字符串、/proc/self/maps 过滤 |
+| **SSL Pinning** | OkHttp3 / OkHttp-Kotlin / Retrofit / Apache HTTP / WebView / NetworkSecurityConfig 全覆盖 |
+
+### iOS 加固绕过
+
+```bash
+fp inject --target YourApp --script fridapilot/templates/ios/hardening_bypass.js --device usb
+```
+
+| 加固方案 | 绕过方式 |
+|---------|---------|
+| **越狱检测** | fileExistsAtPath + C 层 access/stat/open + canOpenURL(cydia://) + fork() 全面拦截 |
+| **Frida 检测** | 端口扫描 (27042) 拦截、dyld 镜像名过滤、strstr 字符串隐藏 |
+| **反调试** | sysctl P_TRACED 清除、ptrace PT_DENY_ATTACH 绕过 |
+| **SSL Pinning** | AFNetworking / TrustKit / URLSession delegate 多框架覆盖 |
+
+### Windows 加固绕过
+
+```bash
+fp inject --target YourApp.exe --script fridapilot/templates/windows/hardening_bypass.js
+```
+
+| 加固方案 | 绕过方式 |
+|---------|---------|
+| **VMProtect** | PE section 名检测 (.vmp)，标记加固类型 |
+| **Themida** | PE section 名检测 (.themida) |
+| **反调试（全面）** | IsDebuggerPresent / CheckRemoteDebuggerPresent / NtQueryInformationProcess (ProcessDebugPort + DebugObjectHandle + DebugFlags) / ThreadHideFromDebugger / OutputDebugString |
+| **时间戳检测** | QueryPerformanceCounter 计时一致性 |
+| **完整性检查** | CreateFileW 监控 .sig/.hash 文件访问 |
+| **VM/沙箱检测** | GetSystemFirmwareTable (SMBIOS) 监控 |
+
+### Electron 加固绕过
+
+```bash
+fp inject --target YourApp.exe --script fridapilot/templates/electron/hardening_bypass.js
+```
+
+| 加固方案 | 绕过方式 |
+|---------|---------|
+| **DevTools 限制** | 移除 devtools-opened 事件监听、移除快捷键拦截、强制打开 DevTools |
+| **Electron Fuses** | 检测 RunAsNode / CookieEncryption / NodeOptions / NodeCliInspect / AsarIntegrity 等 8 项 Fuse 状态 |
+| **asar 完整性** | Hook crypto.createHash 检测 asar 校验过程 |
+| **代码混淆** | Hook eval() / new Function() 捕获动态执行的代码 |
+| **调试检测** | 拦截高频 setInterval + debugger 关键字的反调试定时器 |
+| **安全配置检测** | 枚举所有 BrowserWindow 的 nodeIntegration / contextIsolation / sandbox / webSecurity 配置 |
+| **源码提取** | 自动枚举 asar 包文件树 + 读取 main entry point 源码 |
+
+---
+
 ## MCP 生态
 
 FridaPilot 暴露标准 MCP 工具，可被 Claude Desktop、Cursor、自研 Agent 等直接调用：
