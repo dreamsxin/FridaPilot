@@ -95,6 +95,8 @@ fp run "找到 Android 登录校验函数并打印入参和返回值" --device u
 | `fp bypass ssl-pinning` | 绕过 SSL Pinning | ❌ |
 | `fp bypass anti-debug` | 绕过反调试检测 | ❌ |
 | `fp report` | 生成 Markdown/JSON 报告 | ❌ |
+| `fp crypto scan <binary>` | 扫描二进制文件加密指标（S-Box/API/保护等级） | ❌ |
+| `fp crypto hook-bcrypt` | Hook Windows BCrypt API 捕获运行时密钥 | ❌ |
 | `fp run "<自然语言>"` | AI Agent 闭环执行任务 | ✅ |
 
 ---
@@ -143,6 +145,35 @@ Tool Layer 是 FridaPilot 的核心基础，**纯 Python 实现、无 LLM 依赖
 - 反调试检测绕过
 - 反 Frida 检测绕过
 
+### Crypto Reverse — 二进制加密逆向分析
+
+基于 6 级保护模型的二进制加密逆向工程工具，结合静态分析和 Frida 动态 Hook：
+
+| 等级 | 保护方式 | 攻击策略 |
+|:----:|---------|---------|
+| L0 | 明文 Key/IV 存储在 .rdata 段 | 纯静态分析，S-Box 定位 + 邻近数据提取 |
+| L1 | XOR 混淆 / 分散存储 | 静态分析 + XOR 反混淆 |
+| L2 | 密钥派生 (PBKDF2/HKDF/scrypt) | 代码分析 + Frida Hook 派生材料 |
+| L3 | 白盒 AES (T-table 融合) | DFA 攻击 / T-table 提取 |
+| L4 | 服务端下发密钥 | Frida Hook BCrypt API / 抓包 |
+| L5 | TPM/DPAPI 硬件绑定 | 目标机上 Hook CryptUnprotectData |
+
+功能：
+- PE/ELF 二进制加密指标扫描（S-Box 指纹、Crypto API 导入、加密字符串）
+- 保护等级自动检测（L0-L5）
+- Shannon 熵计算，识别高熵密钥候选区
+- Hex 编码密钥候选提取
+- Windows BCrypt API 运行时 Hook（捕获密钥、IV、明文/密文）
+
+```bash
+# 扫描二进制加密指标
+fp crypto scan target.dll
+fp crypto scan target.dll --json
+
+# Hook BCrypt API 捕获运行时密钥
+fp crypto hook-bcrypt --target YourApp.exe
+```
+
 ---
 
 ## MCP 生态
@@ -162,6 +193,8 @@ frida_collect_messages    # 收集消息
 frida_generate_script     # 从模板生成脚本
 frida_dump_memory         # Dump 内存
 frida_bypass_ssl          # 绕过 SSL Pinning
+frida_crypto_scan         # 扫描二进制加密指标
+frida_crypto_hook_bcrypt  # Hook BCrypt API 捕获密钥
 frida_report              # 生成报告
 ```
 
@@ -210,8 +243,8 @@ fridapilot/
 │   ├── recon.py        # fp recon modules/classes/methods
 │   ├── template.py     # fp template
 │   ├── observe.py      # fp observe
-│   ├── dump.py         # fp dump
 │   ├── bypass.py       # fp bypass
+│   ├── crypto.py       # fp crypto scan / hook-bcrypt
 │   ├── report.py       # fp report
 │   └── run.py          # fp run（需要 LLM）
 ├── tools/              # Tool Layer（纯 Python，无 LLM 依赖）
@@ -220,7 +253,8 @@ fridapilot/
 │   ├── injector.py     # attach/spawn/inject/detach
 │   ├── observer.py     # 消息收集与统计
 │   ├── dump.py         # 内存/字符串/对象图
-│   └── bypass.py       # SSL pinning / 反调试 / 反 Frida
+│   ├── bypass.py       # SSL pinning / 反调试 / 反 Frida
+│   └── crypto_reverse.py # 二进制加密逆向分析（6 级保护模型）
 ├── templates/          # 内置 Frida 脚本模板
 │   ├── java_hook.js
 │   ├── objc_hook.js
