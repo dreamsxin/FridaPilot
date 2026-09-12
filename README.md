@@ -569,8 +569,11 @@ fridapilot/
 - Init 消息(NATIVE_STARTINFO加密) → env-kit 返回 `{"Status":0,"StatusMsg":"success"}`
 - **IPC 协议已完全打通，Init 成功**
 - OpenBrowser 流程：env-kit 先调 `cmp-es-neo.yoxuba.com/api/es/c/detail` 获取容器详情
-- 服务端 IP 白名单验证：`"IP address not allowed: 112.10.254.99"` — 需要本地 Mock Server
-- 下一步: 实现本地 Mock API Server 替换 `cmp-es-neo.yoxuba.com`
+- ✅ Mock Server 本地替代成功（TLS 证书信任 + `Service.ES.Host` 重定向）
+- ❌ `/api/es/c/detail` 响应格式问题：env-kit 用 protobuf+JSON 混合解析，JSON 响应通过但 `UserAgent()` 返回 nil
+- 根因：`ESContext.UserAgent()` 在 `es_browser_context.go:120` 读取 protobuf `Configuration.UserAgentData` 字段
+- JSON Mock 虽然返回 200 但 Go protobuf 反序列化后内部字段为 nil
+- **需要用 Go protobuf 二进制格式返回容器详情，或从 env-kit 二进制提取完整的 .proto 定义**
 
 **完整单机启动方案**（已验证各步骤）：
 1. ✅ 创建 Named Pipe `\\.\pipe\morelogin<random>` (server)
