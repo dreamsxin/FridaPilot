@@ -335,3 +335,158 @@ if (bcrypt) {
     console.log('[FridaPilot] bcrypt.dll not found');
 }
 """
+
+
+@dataclass
+class BruteforceResult:
+    """Result of a brute-force key search."""
+    found: bool = False
+    key_hex: str = ""
+    iv_hex: str = ""
+    key_offset: int = 0
+    key_size: int = 0
+    iv_strategy: str = ""
+    printable_ratio: float = 0.0
+    plaintext_preview: str = ""
+
+
+def bruteforce_key(
+    binary_path: str | Path,
+    ciphertext: bytes,
+    key_sizes: list[int] | None = None,
+    alignment: int = 16,
+    iv_strategies: list[str] | None = None,
+    printable_threshold: float = 0.75,
+    max_candidates: int = 5,
+) -> list[BruteforceResult]:
+    """Brute-force search for AES key in a binary file.
+
+    Iterates aligned blocks in the binary as candidate AES keys,
+    tries decryption, and checks if the result looks like plaintext.
+
+    Args:
+        binary_path: Path to the binary file containing the key.
+        ciphertext: The encrypted data to attempt decryption on.
+        key_sizes: Key sizes to try (default: [16, 32]).
+        alignment: Byte alignment for candidate offsets (16=fast, 4=thorough, 1=exhaustive).
+        iv_strategies: IV strategies: "first16" (prepended IV), "zero", "adjacent".
+        printable_threshold: Minimum ratio of printable chars to consider valid.
+        max_candidates: Maximum number of results to return.
+
+    Returns:
+        List of BruteforceResult for each successful decryption candidate.
+    """
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding
+
+    if key_sizes is None:
+        key_sizes = [16, 32]
+    if iv_strategies is None:
+        iv_strategies = ["first16", "zero", "adjacent"]
+
+    binary_data = Path(binary_path).read_bytes()
+    results: list[BruteforceResult] = []
+
+    def try_decrypt(key: bytes, iv: bytes, ct: bytes) -> bytes | None:
+        try:
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+            dec = cipher.decryptor()
+            plaintext = dec.update(ct) + dec.finalize()
+            # Try PKCS7 unpadding
+            try:
+                unpadder = padding.PKCS7(128).unpadder()
+                plaintext = unpadder.update(plaintext) + unpadder.finalize()
+            except Exception:
+                pass
+            return plaintext
+        except Exception:
+            return None
+
+    def printable_ratio(data: bytes) -> float:
+        if not data:
+            return 0.0
+        count = sum(1 for b in data if 0x20 <= b < 0x7f or b in (0x0a, 0x0d, 0x09))
+        return count / len(data)
+
+    for ks in key_sizes:
+        for offset in range(0, len(binary_data) - ks, alignment):
+            candidate_key = binary_data[offset : offset + ks]
+            # Skip trivial blocks
+            if candidate_key == b"\x00" * ks or candidate_key == b"\xff" * ks:
+                continue
+
+            for iv_strat in iv_strategies:
+                if iv_strat == "first16":
+                    iv = ciphertext[:16]
+                    ct = ciphertext[16:]
+                elif iv_strat == "zero":
+                    iv = b"\x00" * 16
+                    ct = ciphertext
+                elif iv_strat == "adjacent":
+                    iv_offset = offset + ks
+                    if iv_offset + 16 > len(binary_data):
+                        continue
+                    iv = binary_data[iv_offset : iv_offset + 16]
+                    ct = ciphertext
+                else:
+                    continue
+
+                if len(ct) == 0 or len(ct) % 16 != 0:
+                    continue
+
+                plaintext = try_decrypt(candidate_key, iv, ct)
+                if plaintext is None:
+                    continue
+
+                ratio = printable_ratio(plaintext)
+                if ratio >= printable_threshold:
+                    results.append(BruteforceResult(
+                        found=True,
+                        key_hex=candidate_key.hex(),
+                        iv_hex=iv.hex(),
+                        key_offset=offset,
+                        key_size=ks,
+                        iv_strategy=iv_strat,
+                        printable_ratio=ratio,
+                        plaintext_preview=plaintext[:200].decode("utf-8", errors="replace"),
+                    ))
+                    if len(results) >= max_candidates:
+                        return results
+
+    return results
+
+
+def xor_deobfuscate(data: bytes, key: bytes) -> bytes:
+    """XOR deobfuscate data with a repeating key."""
+    key_len = len(key)
+    return bytes(b ^ key[i % key_len] for i, b in enumerate(data))
+
+
+def find_xor_key(
+    encrypted: bytes,
+    known_plaintext: bytes,
+) -> bytes:
+    """Recover XOR key from known plaintext + ciphertext pair.
+
+    If you know part of the plaintext (e.g., file header magic bytes),
+    XOR it with the ciphertext to recover the key.
+    """
+    key_len = min(len(encrypted), len(known_plaintext))
+    return bytes(encrypted[i] ^ known_plaintext[i] for i in range(key_len))
+
+
+def bruteforce_single_byte_xor(data: bytes, top_n: int = 3) -> list[tuple[int, float, str]]:
+    """Try all 256 single-byte XOR keys, rank by printable ratio.
+
+    Returns:
+        List of (key_byte, printable_ratio, preview) sorted by ratio descending.
+    """
+    results = []
+    for key_byte in range(256):
+        decrypted = bytes(b ^ key_byte for b in data)
+        printable = sum(1 for b in decrypted if 0x20 <= b < 0x7f or b in (0x0a, 0x0d, 0x09))
+        ratio = printable / len(data) if data else 0.0
+        preview = decrypted[:80].decode("utf-8", errors="replace")
+        results.append((key_byte, ratio, preview))
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results[:top_n]

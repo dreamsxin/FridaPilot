@@ -97,6 +97,8 @@ fp run "找到 Android 登录校验函数并打印入参和返回值" --device u
 | `fp report` | 生成 Markdown/JSON 报告 | ❌ |
 | `fp crypto scan <binary>` | 扫描二进制文件加密指标（S-Box/API/保护等级） | ❌ |
 | `fp crypto hook-bcrypt` | Hook Windows BCrypt API 捕获运行时密钥 | ❌ |
+| `fp crypto bruteforce` | 暴力搜索二进制中的 AES 密钥 | ❌ |
+| `fp crypto xor` | XOR 反混淆（单字节爆破 / 已知明文 / 已知密钥） | ❌ |
 | `fp run "<自然语言>"` | AI Agent 闭环执行任务 | ✅ |
 
 ---
@@ -314,16 +316,23 @@ fridapilot/
 
 ## 路线图
 
-1. **Phase 1 — Frida 工具层 + CLI** ← 当前阶段
+1. **Phase 1 — Frida 工具层 + CLI** ✅ 已完成
    - 进程发现、attach/spawn/detach
    - 脚本注入、消息收集
    - 模块/类/方法枚举
    - 内置模板、绕过工具
    - CLI: `fp ps` / `fp attach` / `fp inject` / `fp recon` / `fp template` / `fp bypass`
-2. **Phase 2 — MCP Server**
-   - 暴露 MCP 工具接口
+2. **Phase 1.5 — 二进制加密逆向** ✅ 已完成
+   - 6 级保护模型检测 (L0-L5)
+   - AES S-Box 指纹 / Crypto API 检测
+   - AES 密钥暴力搜索 / XOR 反混淆
+   - BCrypt API 运行时 Hook
+   - CLI: `fp crypto scan` / `fp crypto bruteforce` / `fp crypto xor` / `fp crypto hook-bcrypt`
+3. **Phase 2 — MCP Server** ✅ 已完成
+   - 暴露 11 个 MCP 工具接口
    - 支持 Claude Desktop / Cursor 调用
-3. **Phase 3 — AI Agent 闭环**
+   - stdio 传输协议
+4. **Phase 3 — AI Agent 闭环** ← 下一步
    - 自然语言任务规划与执行
    - 脚本生成、错误自动修复
    - 多轮迭代
