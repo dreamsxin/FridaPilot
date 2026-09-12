@@ -41,6 +41,7 @@ from fridapilot.cli.observe import observe_cmd
 from fridapilot.cli.bypass import bypass_app
 from fridapilot.cli.report import report_cmd
 from fridapilot.cli.crypto import crypto_app
+from fridapilot.cli.run import run_cmd
 
 app.command("ps")(ps_cmd)
 app.command("attach")(attach_cmd)
@@ -53,6 +54,7 @@ app.command("observe")(observe_cmd)
 app.add_typer(bypass_app, name="bypass", help="SSL pinning, anti-debug, anti-Frida bypasses.")
 app.command("report")(report_cmd)
 app.add_typer(crypto_app, name="crypto", help="Binary crypto analysis, key extraction, BCrypt hooking.")
+app.command("run")(run_cmd)
 
 
 if __name__ == "__main__":

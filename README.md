@@ -397,19 +397,28 @@ fridapilot/
 │   ├── bypass.py       # SSL pinning / 反调试 / 反 Frida
 │   └── crypto_reverse.py # 二进制加密逆向分析（6 级保护模型）
 ├── templates/          # 内置 Frida 脚本模板
-│   ├── java_hook.js
+│   ├── android/        # Android: comprehensive.js + hardening_bypass.js
+│   ├── ios/            # iOS: comprehensive.js + hardening_bypass.js
+│   ├── windows/        # Windows: comprehensive.js + hardening_bypass.js
+│   ├── macos/          # macOS: comprehensive.js
+│   ├── linux/          # Linux: comprehensive.js
+│   ├── electron/       # Electron: comprehensive.js + hardening_bypass.js
+│   ├── java_hook.js    # 通用模板
 │   ├── objc_hook.js
 │   ├── native_hook.js
 │   ├── ssl_bypass.js
 │   ├── crypto_monitor.js
 │   ├── electron_ipc.js
 │   └── node_hook.js
+├── scripts/            # Python Agent 脚本（独立运行）
+│   ├── android_agent.py
+│   ├── electron_agent.py
+│   └── windows_agent.py
 ├── agent/              # Agent Core（需要 LLM）
-│   ├── planner.py
-│   ├── executor.py
-│   ├── reflector.py
-│   ├── memory.py
-│   └── reporter.py
+│   ├── planner.py      # LLM 任务规划
+│   ├── executor.py     # 工具调度执行
+│   ├── reflector.py    # 错误诊断与修复
+│   └── reporter.py     # 报告生成
 ├── mcp/                # MCP Server
 │   └── server.py
 ├── models/             # Pydantic 数据模型
@@ -471,10 +480,12 @@ fridapilot/
    - 暴露 11 个 MCP 工具接口
    - 支持 Claude Desktop / Cursor 调用
    - stdio 传输协议
-4. **Phase 3 — AI Agent 闭环** ← 下一步
-   - 自然语言任务规划与执行
-   - 脚本生成、错误自动修复
-   - 多轮迭代
+4. **Phase 3 — AI Agent 闭环** ✅ 已完成
+   - Planner: LLM 自然语言任务拆解为 Tool Layer 步骤
+   - Executor: 工具调度、依赖解析、Session 管理
+   - Reflector: 错误诊断（8 类模式匹配）、LLM 修复计划
+   - Reporter: Markdown / JSON 报告生成
+   - CLI: `fp run "自然语言"` 闭环执行
 4. **Phase 4 — 报告与多设备**
    - Markdown / JSON / HTML 报告
    - USB / 远程 frida-server
