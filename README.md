@@ -1,0 +1,308 @@
+# FridaPilot
+
+**AI Agent for Frida automation & dynamic instrumentation.**
+
+AI Agent 驱动的 Frida 自动化动态分析平台。让 Agent 完成 **目标发现 → 运行时侦察 → 脚本生成 → 注入执行 → 数据观测 → 错误修复 → 报告输出** 的闭环。
+
+> **CLI-first 设计**：工具层完全独立，无需 LLM 也能通过 `fp` 命令完成日常 Frida 工作流。
+
+---
+
+## 分层架构
+
+```text
+用户 / Agent / IDE
+        │
+        ▼
+CLI (fp) / MCP Server / Web UI / Python SDK
+        │
+        ▼
+Agent Core（需要 LLM）
+  ├─ Planner        任务规划
+  ├─ Executor       工具执行
+  ├─ Reflector      结果分析、错误修复
+  ├─ Memory         历史、知识库
+  └─ Reporter       报告生成
+        │
+        ▼
+Tool Layer（纯 Python，无需 LLM）
+  ├─ Recon Tools    进程/模块/类/方法枚举
+  ├─ Script Forge   Frida 脚本模板与生成
+  ├─ Injector       attach/spawn/inject/detach
+  ├─ Observer       send/console/错误/性能收集
+  ├─ Dump Tools     内存、字符串、对象图
+  └─ Bypass Tools   反调试、SSL pinning 绕过
+        │
+        ▼
+Frida Core
+  ├─ frida-python
+  ├─ frida-server / USB / Remote
+  └─ Target: Android / iOS / Windows / macOS / Linux / Electron
+```
+
+---
+
+## 快速开始
+
+```bash
+# 安装
+pip install fridapilot
+
+# 列出进程
+fp ps
+fp ps --device usb
+
+# Attach 并注入脚本
+fp attach 1234
+fp inject --target com.example.app --script hook.js
+
+# 枚举模块、类、方法
+fp recon modules --target com.example.app
+fp recon classes --target com.example.app --filter "com.example.*"
+fp recon methods --target com.example.app --class "com.example.MainActivity"
+
+# 使用内置模板
+fp template ssl-bypass --target com.example.app
+fp template crypto-monitor --target com.example.app
+
+# 收集消息并输出报告
+fp observe --target com.example.app --script hook.js --output report.md
+
+# （需要 LLM）自然语言任务
+fp run "监控 Electron 应用所有 IPC 调用并打印参数" --target YourApp
+fp run "找到 Android 登录校验函数并打印入参和返回值" --device usb --spawn com.example.app
+```
+
+---
+
+## CLI 命令一览
+
+| 命令 | 说明 | 需要 LLM |
+|------|------|:---------:|
+| `fp ps` | 列出目标设备上的进程 | ❌ |
+| `fp attach <target>` | Attach 到目标进程 | ❌ |
+| `fp spawn <package>` | Spawn 方式启动并注入 | ❌ |
+| `fp detach` | 断开当前会话 | ❌ |
+| `fp inject --script <file>` | 注入 Frida 脚本 | ❌ |
+| `fp recon modules` | 枚举已加载模块 | ❌ |
+| `fp recon classes` | 枚举 Java/ObjC 类 | ❌ |
+| `fp recon methods` | 枚举类的方法 | ❌ |
+| `fp recon exports` | 枚举模块导出符号 | ❌ |
+| `fp template <name>` | 使用内置脚本模板 | ❌ |
+| `fp observe` | 收集 send/console/异常消息 | ❌ |
+| `fp dump memory` | Dump 内存区域 | ❌ |
+| `fp dump strings` | 提取内存中的字符串 | ❌ |
+| `fp bypass ssl-pinning` | 绕过 SSL Pinning | ❌ |
+| `fp bypass anti-debug` | 绕过反调试检测 | ❌ |
+| `fp report` | 生成 Markdown/JSON 报告 | ❌ |
+| `fp run "<自然语言>"` | AI Agent 闭环执行任务 | ✅ |
+
+---
+
+## Tool Layer 详解
+
+Tool Layer 是 FridaPilot 的核心基础，**纯 Python 实现、无 LLM 依赖**，安全人员可以直接通过 CLI 或 Python SDK 使用。
+
+### Recon Tools — 目标侦察
+
+- 进程枚举（`frida-ps` 封装），支持 USB / 远程 / 本地设备
+- 运行时识别：Android Java/ART、iOS ObjC/Swift、Native C/C++、Electron/Node/V8
+- 模块、导出符号、类、方法、线程枚举
+- Electron 特化：自动区分主进程/渲染进程，识别 IPC 通道、contextBridge、Electron Fuses
+
+### Script Forge — 脚本工厂
+
+- 内置模板库：Java Hook、ObjC Hook、Native Hook、SSL Pinning 绕过、Crypto 监控、Electron IPC Hook、Node.js fs/child_process/net Hook
+- 自动插入 `send()`、堆栈捕获、参数序列化
+- 支持条件断点、采样、延迟注入
+- 语法检查与静态校验
+
+### Injector — 注入执行器
+
+- attach / spawn / detach 全生命周期管理
+- 多设备支持：USB、网络、本地
+- 多会话管理：主进程、渲染进程、子进程
+- 超时、崩溃检测、自动重连
+
+### Observer — 运行时观测
+
+- 收集 `send` 消息、console 输出、异常、崩溃
+- 调用统计：次数、耗时、参数分布
+- 自动识别敏感数据：token、密码、URL、加密参数
+- 输出结构化 JSON 和时间线
+
+### Dump Tools — 内存与数据提取
+
+- 内存区域 dump
+- 字符串提取
+- 对象图遍历
+
+### Bypass Tools — 绕过工具集
+
+- SSL Pinning 绕过（多种方案）
+- 反调试检测绕过
+- 反 Frida 检测绕过
+
+---
+
+## MCP 生态
+
+FridaPilot 暴露标准 MCP 工具，可被 Claude Desktop、Cursor、自研 Agent 等直接调用：
+
+```text
+frida_list_processes      # 列出进程
+frida_attach              # Attach 到进程
+frida_spawn               # Spawn 启动应用
+frida_detach              # 断开会话
+frida_enumerate_modules   # 枚举模块
+frida_enumerate_classes   # 枚举类
+frida_enumerate_methods   # 枚举方法
+frida_inject_script       # 注入脚本
+frida_collect_messages    # 收集消息
+frida_generate_script     # 从模板生成脚本
+frida_dump_memory         # Dump 内存
+frida_bypass_ssl          # 绕过 SSL Pinning
+frida_report              # 生成报告
+```
+
+## Agent 工作流（需要 LLM）
+
+```text
+用户自然语言目标
+      │
+      ▼
+Planner 拆解任务
+      │
+      ▼
+Recon 发现目标与运行时
+      │
+      ▼
+Script Forge 生成 Frida 脚本
+      │
+      ▼
+Injector 注入并执行
+      │
+      ▼
+Observer 收集数据
+      │
+      ▼
+Reflector 分析是否成功
+      │
+  ┌───┴───┐
+  │ 失败  │ → 修复脚本 → 重新注入（多轮迭代）
+  └───┬───┘
+      │ 成功
+      ▼
+Reporter 输出报告与脚本
+```
+
+---
+
+## 项目结构
+
+```text
+fridapilot/
+├── cli/                # CLI 入口（Typer + Rich）
+│   ├── main.py         # fp 命令注册
+│   ├── ps.py           # fp ps
+│   ├── attach.py       # fp attach / spawn / detach
+│   ├── inject.py       # fp inject
+│   ├── recon.py        # fp recon modules/classes/methods
+│   ├── template.py     # fp template
+│   ├── observe.py      # fp observe
+│   ├── dump.py         # fp dump
+│   ├── bypass.py       # fp bypass
+│   ├── report.py       # fp report
+│   └── run.py          # fp run（需要 LLM）
+├── tools/              # Tool Layer（纯 Python，无 LLM 依赖）
+│   ├── recon.py        # 进程/模块/类/方法枚举
+│   ├── script_forge.py # 脚本模板与生成
+│   ├── injector.py     # attach/spawn/inject/detach
+│   ├── observer.py     # 消息收集与统计
+│   ├── dump.py         # 内存/字符串/对象图
+│   └── bypass.py       # SSL pinning / 反调试 / 反 Frida
+├── templates/          # 内置 Frida 脚本模板
+│   ├── java_hook.js
+│   ├── objc_hook.js
+│   ├── native_hook.js
+│   ├── ssl_bypass.js
+│   ├── crypto_monitor.js
+│   ├── electron_ipc.js
+│   └── node_hook.js
+├── agent/              # Agent Core（需要 LLM）
+│   ├── planner.py
+│   ├── executor.py
+│   ├── reflector.py
+│   ├── memory.py
+│   └── reporter.py
+├── mcp/                # MCP Server
+│   └── server.py
+├── models/             # Pydantic 数据模型
+│   └── schemas.py
+└── storage/            # SQLite 存储
+    └── db.py
+```
+
+---
+
+## 技术栈
+
+- **核心**：Python 3.11+、frida、frida-tools
+- **CLI**：Typer + Rich
+- **数据校验**：Pydantic
+- **存储**：SQLite + SQLModel
+- **MCP**：MCP Python SDK
+- **LLM**（可选）：LiteLLM（兼容 OpenAI / Claude / 本地模型）
+- **Agent**（可选）：自研 Planner / Executor / Reflector
+
+---
+
+## 安全与合规
+
+- 仅用于 **授权安全测试、自有应用、CTF、安全研究**
+- 目标白名单机制，禁止未授权目标
+- 审计日志记录所有操作
+- 只读模式、速率限制
+- 敏感数据脱敏输出
+- 每次任务生成可复现的脚本、日志和报告
+
+---
+
+## 差异化
+
+- **闭环自动化**：生成 → 注入 → 观测 → 修复，不只是单次脚本生成
+- **运行时上下文感知**：先侦察再生成，减少 LLM 幻觉
+- **MCP 标准化**：可被 Claude Desktop / Cursor / 任意 Agent 调用
+- **Electron / Node / 移动端统一支持**
+- **CLI-first**：无 LLM 也能完成完整工作流，安全人员即插即用
+
+---
+
+## 路线图
+
+1. **Phase 1 — Frida 工具层 + CLI** ← 当前阶段
+   - 进程发现、attach/spawn/detach
+   - 脚本注入、消息收集
+   - 模块/类/方法枚举
+   - 内置模板、绕过工具
+   - CLI: `fp ps` / `fp attach` / `fp inject` / `fp recon` / `fp template` / `fp bypass`
+2. **Phase 2 — MCP Server**
+   - 暴露 MCP 工具接口
+   - 支持 Claude Desktop / Cursor 调用
+3. **Phase 3 — AI Agent 闭环**
+   - 自然语言任务规划与执行
+   - 脚本生成、错误自动修复
+   - 多轮迭代
+4. **Phase 4 — 报告与多设备**
+   - Markdown / JSON / HTML 报告
+   - USB / 远程 frida-server
+   - 多进程会话管理
+5. **Phase 5 — Web UI 与生态**
+   - Web 控制台、时间线、脚本编辑器
+   - 插件系统、社区模板
+
+---
+
+## License
+
+MIT
