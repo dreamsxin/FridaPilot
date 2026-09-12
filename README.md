@@ -568,7 +568,9 @@ fridapilot/
 - 正确流程: 创建管道(server) → 启动 env-kit -gt/-it 指向管道 → env-kit 作为 client 连接
 - Init 消息(NATIVE_STARTINFO加密) → env-kit 返回 `{"Status":0,"StatusMsg":"success"}`
 - **IPC 协议已完全打通，Init 成功**
-- 下一步: 发送 OpenBrowser 命令启动浏览器
+- OpenBrowser 流程：env-kit 先调 `cmp-es-neo.yoxuba.com/api/es/c/detail` 获取容器详情
+- 服务端 IP 白名单验证：`"IP address not allowed: 112.10.254.99"` — 需要本地 Mock Server
+- 下一步: 实现本地 Mock API Server 替换 `cmp-es-neo.yoxuba.com`
 - env-kit 内部调用 `ipc.Dial` 作为 client 连接到 Electron 创建的 Named Pipe
 - `browsermanager.initIpcServerForKernel` / `obtainKernelIpcName` 为 chrome.dll 创建独立 IPC server
 - `NamedPipeAddress` (JSON: `named_pipe_address`) 是 init.json 中的管道地址字段
