@@ -564,18 +564,11 @@ fridapilot/
 - 关键日志: `connect to biz ipc error` / `recover new ipc server` / `client disconnected`
 
 **Frida spawn 验证结果**：
-- Frida 可以成功 spawn env-kit.exe 并注入
-- `-p <kernelPath>` 模式：输出 kernel machine code (MD5) 后退出
-- `-gt`/`-it` 模式：**立即退出，无任何 pipe API 调用**（Go 层面决定退出）
-- Hook kernel32 pipe API 无效果——Go 可能用 syscall 直连
-- 需要分析 Go `main.main` 汇编确定 IPC 模式的启动条件
-
-**新发现 (深入分析)**：
-- filechk.sys: WFP 网络过滤驱动（FwpsRedirect/FwpmSubLayer），用于流量重定向，非 DRM
-- `bufio.NewScanner` 与 `reporter.Report` 相邻 @ 0xadc71d — env-kit 可能通过 stdin 读初始化数据
-- Go pclntab magic 在 0xd645f，main.main 字符串在 0xafd400
-- `meta.BrowserRunningMode` 结构体存在 — IPC 模式由 RunningMode 字段控制
-- env-kit 可能需要：`-gt tag -it tag` + **stdin JSON 初始化数据** 才能进入 IPC 模式
+- 管道名必须以 `morelogin` 开头: `\\.\pipe\morelogin<random>`（硬编码验证）
+- 正确流程: 创建管道(server) → 启动 env-kit -gt/-it 指向管道 → env-kit 作为 client 连接
+- Init 消息(NATIVE_STARTINFO加密) → env-kit 返回 `{"Status":0,"StatusMsg":"success"}`
+- **IPC 协议已完全打通，Init 成功**
+- 下一步: 发送 OpenBrowser 命令启动浏览器
 - env-kit 内部调用 `ipc.Dial` 作为 client 连接到 Electron 创建的 Named Pipe
 - `browsermanager.initIpcServerForKernel` / `obtainKernelIpcName` 为 chrome.dll 创建独立 IPC server
 - `NamedPipeAddress` (JSON: `named_pipe_address`) 是 init.json 中的管道地址字段
