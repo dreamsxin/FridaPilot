@@ -577,8 +577,8 @@ fridapilot/
 2. ✅ 启动 env-kit.exe `-gt <pipe> -it <pipe>` (client 连接)
 3. ✅ 发送 Init (NATIVE_STARTINFO 加密) → Status:0 success
 4. ✅ 发送 OpenBrowser → env-kit 识别内核 `chrome_64_150.1.4.20`
-5. ⏳ 启动本地 Mock Server 替换 `cmp-es-neo.yoxuba.com` API
-6. ⏳ env-kit 调 Mock API 获取容器详情 → 构造 init.json → 启动浏览器
+5. ✅ Mock Server TLS 证书验证通过，API 调用成功
+6. ⏳ 完善 Mock Server `/api/es/c/detail` 响应数据（缺少 UserAgent 导致 nil panic）
 - env-kit 内部调用 `ipc.Dial` 作为 client 连接到 Electron 创建的 Named Pipe
 - `browsermanager.initIpcServerForKernel` / `obtainKernelIpcName` 为 chrome.dll 创建独立 IPC server
 - `NamedPipeAddress` (JSON: `named_pipe_address`) 是 init.json 中的管道地址字段
