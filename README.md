@@ -563,8 +563,12 @@ fridapilot/
 - IPC 流程: env-kit 作为 client 连接到 Electron 创建的管道
 - 关键日志: `connect to biz ipc error` / `recover new ipc server` / `client disconnected`
 
-**待解决**：
-- env-kit 传入 `-gt`/`-it` 后立即退出(exit 0)，原因: `Invalid pipe address '%s'` 验证失败
+**Frida spawn 验证结果**：
+- Frida 可以成功 spawn env-kit.exe 并注入
+- `-p <kernelPath>` 模式：输出 kernel machine code (MD5) 后退出
+- `-gt`/`-it` 模式：**立即退出，无任何 pipe API 调用**（Go 层面决定退出）
+- Hook kernel32 pipe API 无效果——Go 可能用 syscall 直连
+- 需要分析 Go `main.main` 汇编确定 IPC 模式的启动条件
 - env-kit 内部调用 `ipc.Dial` 作为 client 连接到 Electron 创建的 Named Pipe
 - `browsermanager.initIpcServerForKernel` / `obtainKernelIpcName` 为 chrome.dll 创建独立 IPC server
 - `NamedPipeAddress` (JSON: `named_pipe_address`) 是 init.json 中的管道地址字段
