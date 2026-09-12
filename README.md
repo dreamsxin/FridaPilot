@@ -526,9 +526,32 @@ fridapilot/
 
 **工具改进方向**：
 - `crypto_reverse` 需要 PE 交叉引用追踪能力
-- 需要新增 Electron app.asar 解包分析工具
+- 需要新增 Electron app.asar 解包分析工具（处理混淆文件名）
 - 需要新增 Go binary 字符串/API 分析工具
 - 需要新增 Named Pipe IPC 协议嗅探工具
+
+### 紫鸟实战进展记录
+
+**安装目录结构** (`D:\Program Files\ziniao`)：
+- `ziniao.exe` (164.9MB) — Electron 主进程
+- `resources/app.asar` (97.8MB) — **文件名 hash 混淆**，非标准结构，直接解包失败
+- `resources/app.asar.unpacked/envkit/env-kit.exe` (14.1MB) — Go IPC 管理器
+- `resources/app.asar.unpacked/envkit/ziniao-gateway.exe` (35.7MB) — 网络代理网关
+
+**内核** (`chrome_64_150.1.4.20`)：
+- `ziniaobrowser.exe` — 定制 Chromium
+- `chrome.dll` (275.7MB) — 定制 Chromium 核心
+
+**chrome.dll 退出码**（从零验证）：
+- exit 10000：缺少 `--store_data_path` 参数
+- exit 10001：启动验证函数 (0x320bc20) 返回 false
+- exit 10009：Token 验证函数 (0x32243b0) 返回 false
+- exit 10002：License 检查函数 (0x32428f0) 返回 false
+
+**关键教训**：
+- ❌ 直接 patch chrome.dll 跳过所有检查 → 崩溃（缺少 IPC 环境）
+- ✅ 正确方案：通过 env-kit.exe Named Pipe IPC 正常启动
+- app.asar 文件名 hash 混淆，需要运行时 Frida Hook 分析而非静态解包
 
 ---
 
