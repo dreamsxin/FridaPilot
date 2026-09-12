@@ -571,6 +571,14 @@ fridapilot/
 - OpenBrowser 流程：env-kit 先调 `cmp-es-neo.yoxuba.com/api/es/c/detail` 获取容器详情
 - 服务端 IP 白名单验证：`"IP address not allowed: 112.10.254.99"` — 需要本地 Mock Server
 - 下一步: 实现本地 Mock API Server 替换 `cmp-es-neo.yoxuba.com`
+
+**完整单机启动方案**（已验证各步骤）：
+1. ✅ 创建 Named Pipe `\\.\pipe\morelogin<random>` (server)
+2. ✅ 启动 env-kit.exe `-gt <pipe> -it <pipe>` (client 连接)
+3. ✅ 发送 Init (NATIVE_STARTINFO 加密) → Status:0 success
+4. ✅ 发送 OpenBrowser → env-kit 识别内核 `chrome_64_150.1.4.20`
+5. ⏳ 启动本地 Mock Server 替换 `cmp-es-neo.yoxuba.com` API
+6. ⏳ env-kit 调 Mock API 获取容器详情 → 构造 init.json → 启动浏览器
 - env-kit 内部调用 `ipc.Dial` 作为 client 连接到 Electron 创建的 Named Pipe
 - `browsermanager.initIpcServerForKernel` / `obtainKernelIpcName` 为 chrome.dll 创建独立 IPC server
 - `NamedPipeAddress` (JSON: `named_pipe_address`) 是 init.json 中的管道地址字段
