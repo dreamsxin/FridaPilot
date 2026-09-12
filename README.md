@@ -418,13 +418,14 @@ fridapilot/
 │   ├── planner.py      # LLM 任务规划
 │   ├── executor.py     # 工具调度执行
 │   ├── reflector.py    # 错误诊断与修复
+│   ├── memory.py       # 历史记忆与知识复用
 │   └── reporter.py     # 报告生成
 ├── mcp/                # MCP Server
 │   └── server.py
 ├── models/             # Pydantic 数据模型
 │   └── schemas.py
-└── storage/            # SQLite 存储
-    └── db.py
+└── storage/            # SQLite 持久化
+    └── db.py           # 任务/脚本/Hook点/消息历史
 ```
 
 ---
