@@ -497,6 +497,41 @@ fridapilot/
 
 ---
 
+## 实战验证
+
+### Case 1: FbBrowser Cfg.dat 解密
+
+使用 `fp crypto scan` 分析 YunLogin_Core.dll：
+- 识别出 BCrypt CNG + AES-CBC，保护等级 L2（device_id 派生密钥）
+- 发现硬编码候选密钥 `00c06c30f0d792d93b7d206cbb3aaca8`（邻近 "Cfg.dat"）
+- 静态解密未成功（密钥为派生密钥，非直接使用）
+- 编写 BCrypt Hook 脚本捕获运行时密钥（动态方案）
+
+**工具验证**：`scan_binary` 正确识别了加密方案和保护等级
+
+### Case 2: 紫鸟浏览器单机模式（进行中）
+
+目标：Electron + Go (env-kit.exe) + 定制 Chromium 内核的完整逆向
+
+静态分析发现：
+- chrome.dll (275MB) 定制 Chromium：3 个 exit code 检查点（10000/10001/10002/10009）
+- init.json AES-128-CBC 加密，store_data_path 同密钥体系
+- 3 层 IPC 加密（NATIVE_STARTINFO / NATIVE_IPC / NETWORK）
+- env-kit.exe 通过 Named Pipe 管理浏览器生命周期
+
+关键发现：
+- 直接 patch chrome.dll 绕过检查 → 崩溃（缺少 IPC 环境）
+- 正确路径是通过 env-kit IPC 协议正常启动
+- 需要新增 PE 导出分析、Go binary 分析、Named Pipe IPC 工具
+
+**工具改进方向**：
+- `crypto_reverse` 需要 PE 交叉引用追踪能力
+- 需要新增 Electron app.asar 解包分析工具
+- 需要新增 Go binary 字符串/API 分析工具
+- 需要新增 Named Pipe IPC 协议嗅探工具
+
+---
+
 ## License
 
 MIT
