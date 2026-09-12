@@ -13,3 +13,10 @@ venv/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+
+# Real-world case scripts - contains target-specific code, avoid legal/security risk
+cases/
+
+# Decrypted output files
+*_decrypted.*
+.commitmsg
