@@ -569,6 +569,13 @@ fridapilot/
 - `-gt`/`-it` 模式：**立即退出，无任何 pipe API 调用**（Go 层面决定退出）
 - Hook kernel32 pipe API 无效果——Go 可能用 syscall 直连
 - 需要分析 Go `main.main` 汇编确定 IPC 模式的启动条件
+
+**新发现 (深入分析)**：
+- filechk.sys: WFP 网络过滤驱动（FwpsRedirect/FwpmSubLayer），用于流量重定向，非 DRM
+- `bufio.NewScanner` 与 `reporter.Report` 相邻 @ 0xadc71d — env-kit 可能通过 stdin 读初始化数据
+- Go pclntab magic 在 0xd645f，main.main 字符串在 0xafd400
+- `meta.BrowserRunningMode` 结构体存在 — IPC 模式由 RunningMode 字段控制
+- env-kit 可能需要：`-gt tag -it tag` + **stdin JSON 初始化数据** 才能进入 IPC 模式
 - env-kit 内部调用 `ipc.Dial` 作为 client 连接到 Electron 创建的 Named Pipe
 - `browsermanager.initIpcServerForKernel` / `obtainKernelIpcName` 为 chrome.dll 创建独立 IPC server
 - `NamedPipeAddress` (JSON: `named_pipe_address`) 是 init.json 中的管道地址字段
