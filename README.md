@@ -71,6 +71,11 @@ fp observe --target com.example.app --script hook.js --output report.md
 # （需要 LLM）自然语言任务
 fp run "监控 Electron 应用所有 IPC 调用并打印参数" --target YourApp
 fp run "找到 Android 登录校验函数并打印入参和返回值" --device usb --spawn com.example.app
+
+# Python Agent 脚本（各平台一键逆向）
+python -m fridapilot.scripts.electron_agent --target YourApp.exe
+python -m fridapilot.scripts.android_agent --target com.example.app --device usb --spawn
+python -m fridapilot.scripts.windows_agent --target YourApp.exe
 ```
 
 ---
@@ -175,6 +180,74 @@ fp crypto scan target.dll --json
 # Hook BCrypt API 捕获运行时密钥
 fp crypto hook-bcrypt --target YourApp.exe
 ```
+
+---
+
+## 各平台逆向分析脚本
+
+FridaPilot 为每个目标平台提供 **JS 注入脚本 + Python Agent 脚本** 两套方案。JS 脚本通过 `fp inject` 注入，Python Agent 脚本可独立运行，自动 attach/spawn + 结构化输出。
+
+### Electron（重点）
+
+Electron 应用逆向涵盖主进程/渲染进程/IPC/Node.js/Fuses 全方位：
+
+```bash
+# JS 脚本方式
+fp inject --target YourApp.exe --script fridapilot/templates/electron/comprehensive.js
+
+# Python Agent 方式（推荐）
+python -m fridapilot.scripts.electron_agent --target YourApp.exe
+python -m fridapilot.scripts.electron_agent --target YourApp.exe --devtools
+```
+
+覆盖能力：
+- IPC 通信全量监控：ipcRenderer.send/invoke/sendSync + ipcMain.handle/on
+- contextBridge API 枚举（暴露给渲染进程的接口）
+- BrowserWindow 安全配置检测（nodeIntegration/contextIsolation/sandbox）
+- Electron Fuses 检测（runAsNode/cookieEncryption/nodeOptions/asarIntegrity）
+- asar 包内容枚举 + package.json 解析
+- Node.js 模块调用监控：fs / child_process / crypto / http / net
+- 强制打开 DevTools
+
+### Android
+
+```bash
+python -m fridapilot.scripts.android_agent --target com.example.app --device usb --spawn
+```
+
+覆盖能力：Activity 生命周期、SharedPreferences 读写、Cipher/MessageDigest 加密、OkHttp/URL 网络请求、Root 检测绕过、Intent 监控
+
+### iOS
+
+```bash
+fp inject --target YourApp --script fridapilot/templates/ios/comprehensive.js --device usb
+```
+
+覆盖能力：ViewController 生命周期、Keychain 读写、NSURLSession 网络、CommonCrypto 加密、越狱检测绕过、UserDefaults 监控
+
+### Windows
+
+```bash
+python -m fridapilot.scripts.windows_agent --target YourApp.exe
+```
+
+覆盖能力：BCrypt/CryptoAPI 加密、注册表操作、CreateFileW 文件操作、WinHTTP/Winsock 网络、IsDebuggerPresent/NtQueryInformationProcess 反调试绕过
+
+### macOS
+
+```bash
+fp inject --target YourApp --script fridapilot/templates/macos/comprehensive.js
+```
+
+覆盖能力：Keychain 操作、NSURLSession 网络、NSTask 命令执行、文件操作、代码签名检查、CommonCrypto 加密
+
+### Linux
+
+```bash
+fp inject --target your_app --script fridapilot/templates/linux/comprehensive.js
+```
+
+覆盖能力：open/openat 文件操作、connect/getaddrinfo 网络、execve/system 命令执行、OpenSSL SSL_read/SSL_write、ptrace 反调试绕过、dlopen 动态加载监控
 
 ---
 
