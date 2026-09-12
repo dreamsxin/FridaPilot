@@ -564,9 +564,20 @@ fridapilot/
 - 关键日志: `connect to biz ipc error` / `recover new ipc server` / `client disconnected`
 
 **待解决**：
-- env-kit 传入 `-gt`/`-it` 后立即退出(exit 0)，可能需要额外初始化条件
-- 需要 Frida Hook 运行中的紫鸟客户端，捕获 env-kit 实际启动参数和 IPC 通信
-- FridaPilot 需要新增 Go binary 字符串提取工具、Named Pipe IPC 嗅探工具
+- env-kit 传入 `-gt`/`-it` 后立即退出(exit 0)，原因: `Invalid pipe address '%s'` 验证失败
+- env-kit 内部调用 `ipc.Dial` 作为 client 连接到 Electron 创建的 Named Pipe
+- `browsermanager.initIpcServerForKernel` / `obtainKernelIpcName` 为 chrome.dll 创建独立 IPC server
+- `NamedPipeAddress` (JSON: `named_pipe_address`) 是 init.json 中的管道地址字段
+- FridaPilot 需要新增 Go binary 符号提取工具（已验证可从 env-kit 提取 500+ 函数符号）
+- 需要新增 Named Pipe IPC 协议嗅探工具
+
+**env-kit Go 符号分析** (V2.29.19, go1.20.14):
+- 完整源码结构: `env-kit-neo/internal/` (browsermanager/conf/context/envkit/ipc/model/module/...)
+- IPC 包: `Dial`/`Listen`/`NewClientWithTimeout`/`NewServerWithListen`/`createNamedPipe`/`connectNamedPipe`
+- 浏览器管理: `ExecBrowser`/`openBrowser`/`writeInitToFile`/`initIpcServerForKernel`
+- 加密: `BizEncrypt`/`BizDecrypt`/`AESEncrypt`/`AESDecrypt`/`PKCS7Padding`
+- 内核管理: `downloadBrowserCore`/`OnCoreDownloading`/`OnCoreExtractSuccess`
+- Protobuf 模型: container/configuration/cookie/profile/canvas_fingerprint 等
 
 ---
 
