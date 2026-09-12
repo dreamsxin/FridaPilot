@@ -549,9 +549,24 @@ fridapilot/
 - exit 10002：License 检查函数 (0x32428f0) 返回 false
 
 **关键教训**：
-- ❌ 直接 patch chrome.dll 跳过所有检查 → 崩溃（缺少 IPC 环境）
+- ❌ 直接 patch chrome.dll 绕过所有检查 → 崩溃（缺少 IPC 环境）
+- ❌ 直接启动 ziniaobrowser.exe + store_data_path → exit 10001/10009（缺少 IPC 心跳）
 - ✅ 正确方案：通过 env-kit.exe Named Pipe IPC 正常启动
-- app.asar 文件名 hash 混淆，需要运行时 Frida Hook 分析而非静态解包
+- app.asar 文件名 hash 混淆，需要运行时分析而非静态解包
+
+**env-kit.exe 分析发现** (Go binary, V2.29.19)：
+- 参数: `-gt <GroupTag> -it <IPCTag> -p <core_path> -v`
+- 源码: `D:/MyProject/env-kit-neo/internal/pkg/ipc/npipe_windows.go`
+- IPC 包: `ipc.Conn` / `ipc.PipeAddr` / `ipc.PipeConn` / `ipc.PipeError`
+- 管道前缀: `\\.\pipe\_` (内部拼接，非参数直传)
+- JSON 字段: `NamedPipeAddress` (`named_pipe_address`)
+- IPC 流程: env-kit 作为 client 连接到 Electron 创建的管道
+- 关键日志: `connect to biz ipc error` / `recover new ipc server` / `client disconnected`
+
+**待解决**：
+- env-kit 传入 `-gt`/`-it` 后立即退出(exit 0)，可能需要额外初始化条件
+- 需要 Frida Hook 运行中的紫鸟客户端，捕获 env-kit 实际启动参数和 IPC 通信
+- FridaPilot 需要新增 Go binary 字符串提取工具、Named Pipe IPC 嗅探工具
 
 ---
 
