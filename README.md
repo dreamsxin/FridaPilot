@@ -570,24 +570,31 @@ fridapilot/
 - **IPC 协议已完全打通，Init 成功**
 - OpenBrowser 流程：env-kit 先调 `cmp-es-neo.yoxuba.com/api/es/c/detail` 获取容器详情
 - ✅ Mock Server 本地替代成功（TLS 证书信任 + `Service.ES.Host` 重定向）
-- ❌ `/api/es/c/detail` 响应格式问题：env-kit 用 protobuf+JSON 混合解析，JSON 响应通过但 `UserAgent()` 返回 nil
-- 根因：`ESContext.UserAgent()` 在 `es_browser_context.go:120` 读取 protobuf `Configuration.UserAgentData` 字段
-- JSON Mock 虽然返回 200 但 Go protobuf 反序列化后内部字段为 nil
-- **需要用 Go protobuf 二进制格式返回容器详情，或从 env-kit 二进制提取完整的 .proto 定义**
+- ✅ `/api/es/c/detail` 响应格式已解决：respdata 外层 JSON (code/data) + 内层 protojson (snake_case json tags)
+- 关键发现：resty 自动 JSON 反序列化 + protojson 内层，字段名必须用 snake_case (json tag)
+- Container.user_agent 是 STRING 类型（非嵌套消息），直接传 UA 字符串
+- ContainerDetailResponse 需要完整的 configurations/advanced/cookie/profile 字段
+- ✅ `configurations.start_up_args: "[]"` 解决 ExecArgs nil panic
+- ✅ `advanced` 完整 AdvancedSetting 解决 advanceSetting nil panic
+- ✅ 32位/64位内核路径 junction 解决 `chrome_32_*` 路径不存在问题
+- ✅ **ziniaobrowser.exe 首次成功启动！** (exec browser success, pid 出现)
+- ❌ exit 10009 (Token 验证失败) — init.json 中 token 字段全为空
+- ✅ **Frida hook chrome.dll token/startup/license verify 函数 → 强制返回 true**
+- ✅ **浏览器完整启动成功！** Progress 100%, OpenBrowser status=0
+- ⚠️ 启动后 chrome.dll 因缺少内核 IPC 心跳而异常退出 (OnBrowserAbnormalExited, Code 1000900)
+- 后续：需要实现内核 IPC 心跳协议保持浏览器运行
 
-**完整单机启动方案**（已验证各步骤）：
+**完整单机启动方案**（v7 验证结果）：
 1. ✅ 创建 Named Pipe `\\.\pipe\morelogin<random>` (server)
 2. ✅ 启动 env-kit.exe `-gt <pipe> -it <pipe>` (client 连接)
 3. ✅ 发送 Init (NATIVE_STARTINFO 加密) → Status:0 success
-4. ✅ 发送 OpenBrowser → env-kit 识别内核 `chrome_64_150.1.4.20`
-5. ✅ Mock Server TLS 证书验证通过，API 调用成功
-6. ⏳ `/api/es/c/detail` 使用 protobuf 编码，JSON Mock 返回后 env-kit 解析为 nil → crash
-   - 需要: 正确的 protobuf 响应格式，或修改 OpenBrowser 让 env-kit 跳过远程 API
-- env-kit 内部调用 `ipc.Dial` 作为 client 连接到 Electron 创建的 Named Pipe
-- `browsermanager.initIpcServerForKernel` / `obtainKernelIpcName` 为 chrome.dll 创建独立 IPC server
-- `NamedPipeAddress` (JSON: `named_pipe_address`) 是 init.json 中的管道地址字段
-- FridaPilot 需要新增 Go binary 符号提取工具（已验证可从 env-kit 提取 500+ 函数符号）
-- 需要新增 Named Pipe IPC 协议嗅探工具
+4. ✅ 发送 OpenBrowser → env-kit 获取容器详情 → 写 init.json → 启动 ziniaobrowser.exe
+5. ✅ Mock Server: protojson snake_case 响应 + TLS 证书信任
+6. ✅ Frida hook chrome.dll: token verify/startup verify/license check 全部绕过
+7. ✅ **浏览器启动成功，Progress 5%→100%，OpenBrowser status=0**
+8. ⏳ 浏览器启动后因内核 IPC 通道断开而异常退出 (Code 1000900)
+   - env-kit 创建了 `initIpcServerForKernel` 管道但 chrome.dll 无法建立持续通信
+   - 需要分析并实现内核 IPC 心跳协议
 
 **env-kit Go 符号分析** (V2.29.19, go1.20.14):
 - 完整源码结构: `env-kit-neo/internal/` (browsermanager/conf/context/envkit/ipc/model/module/...)

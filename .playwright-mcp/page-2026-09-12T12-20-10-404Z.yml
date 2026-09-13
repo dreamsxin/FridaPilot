@@ -1,0 +1,56 @@
+- generic [ref=e3]:
+  - banner [ref=e5]:
+    - generic [ref=e6]:
+      - strong [ref=e7]: 第 1 座 · 三阶
+      - generic [ref=e8]: 同在第 1 层
+    - generic [ref=e9]:
+      - strong [ref=e10]: 0 / 2
+      - generic [ref=e11]: 推移步数
+    - generic [ref=e12]:
+      - strong [ref=e19]: "0"
+      - generic [ref=e20]: 已爬 0 层
+  - group "观察视角" [ref=e21]:
+    - button "俯视" [pressed] [ref=e22] [cursor=pointer]
+    - button "侧视" [ref=e23] [cursor=pointer]
+    - button "转台" [ref=e24] [cursor=pointer]
+  - paragraph [ref=e25]: 出口就在这一层：横滑推整行，竖滑推整列，把门对上
+  - generic [ref=e26]:
+    - generic [ref=e27]: 第 1 层
+    - generic [ref=e28]:
+      - button "看上一层" [ref=e29] [cursor=pointer]
+      - button "看下一层" [ref=e32] [cursor=pointer]
+  - paragraph [ref=e35]: 横滑推行 · 竖滑推列
+  - contentinfo [ref=e36]:
+    - button "撤销" [ref=e37] [cursor=pointer]
+    - button "提示" [ref=e41] [cursor=pointer]
+    - button "重开这一座" [ref=e44] [cursor=pointer]
+    - button "音效已开" [ref=e48] [cursor=pointer]
+    - button "玩法" [ref=e53] [cursor=pointer]
+  - dialog "玩法" [ref=e57]:
+    - heading "魔方爬楼" [level=2] [ref=e58]
+    - list [ref=e59]:
+      - listitem [ref=e60]:
+        - strong [ref=e61]: 目标
+        - text: 走到绿色门拱那一格就算通了。绿色光柱指着它在哪一列哪一排。
+      - listitem [ref=e62]:
+        - strong [ref=e63]: 前两座是热身
+        - text: 第 1 座的出口就在你脚下那一层，只用推行推列；第 2 座才抬到楼上。
+      - listitem [ref=e64]:
+        - strong [ref=e65]: 推砖
+        - text: 横滑推动一整行，竖滑推动一整列，掉出边界的砖从对面绕回来。只有推砖计步，走位免费。
+      - listitem [ref=e66]:
+        - strong [ref=e67]: 推柱
+        - text: 切到侧视再竖滑，推的就是一整根柱 —— 砖在楼层之间上下搬，这是第三条轴。
+      - listitem [ref=e68]:
+        - strong [ref=e69]: 视角
+        - text: 视角就是轴选择器：转到哪一面就推那一面，跟拧魔方一样。转台只看不推。
+      - listitem [ref=e70]:
+        - strong [ref=e71]: 看路线
+        - text: 砖上那条亮线就是路。两格的亮线在交界处接上才通得过，顶着墙就是断的。
+      - listitem [ref=e72]:
+        - strong [ref=e73]: 上下
+        - text: 偏绿的四角立柱是能往上走，地板上一圈绿框是能往下走 —— 竖着的连接是绿的。
+      - listitem [ref=e74]:
+        - strong [ref=e75]: 爬楼
+        - text: 通一座接一座，阶数从三阶涨到六阶。没有失败，只看你能爬多高。
+    - button "开始爬" [ref=e76] [cursor=pointer]
