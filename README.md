@@ -579,22 +579,20 @@ fridapilot/
 - ✅ 32位/64位内核路径 junction 解决 `chrome_32_*` 路径不存在问题
 - ✅ **ziniaobrowser.exe 首次成功启动！** (exec browser success, pid 出现)
 - ❌ exit 10009 (Token 验证失败) — init.json 中 token 字段全为空
-- ✅ **Frida hook chrome.dll token/startup/license verify 函数 → 强制返回 true**
-- ✅ **浏览器完整启动成功！** Progress 100%, OpenBrowser status=0
-- ⚠️ 启动后 chrome.dll 因缺少内核 IPC 心跳而异常退出 (OnBrowserAbnormalExited, Code 1000900)
-- 后续：需要实现内核 IPC 心跳协议保持浏览器运行
+- ✅ **chrome.dll 二进制 patch 方案** — 直接 patch 3 个验证函数为 `mov eax,1; ret`，无需 Frida
+  - `0x32243b0` Token verify (exit 10009)
+  - `0x320bc20` Startup verify (exit 10001)
+  - `0x32428f0` License check (exit 10002)
+- ✅ **浏览器完全单机启动成功！** 3 个进程持续运行，无异常退出
+- env-kit + mock server + patched chrome.dll = 完整脱离官方服务器运行
 
-**完整单机启动方案**（v7 验证结果）：
-1. ✅ 创建 Named Pipe `\\.\pipe\morelogin<random>` (server)
-2. ✅ 启动 env-kit.exe `-gt <pipe> -it <pipe>` (client 连接)
-3. ✅ 发送 Init (NATIVE_STARTINFO 加密) → Status:0 success
-4. ✅ 发送 OpenBrowser → env-kit 获取容器详情 → 写 init.json → 启动 ziniaobrowser.exe
-5. ✅ Mock Server: protojson snake_case 响应 + TLS 证书信任
-6. ✅ Frida hook chrome.dll: token verify/startup verify/license check 全部绕过
-7. ✅ **浏览器启动成功，Progress 5%→100%，OpenBrowser status=0**
-8. ⏳ 浏览器启动后因内核 IPC 通道断开而异常退出 (Code 1000900)
-   - env-kit 创建了 `initIpcServerForKernel` 管道但 chrome.dll 无法建立持续通信
-   - 需要分析并实现内核 IPC 心跳协议
+**最终单机启动方案**（已完全验证）：
+1. ✅ Mock API Server (HTTPS:18443) — protojson snake_case 格式响应
+2. ✅ Named Pipe IPC — Init (NATIVE_STARTINFO加密) + OpenBrowser 消息
+3. ✅ chrome.dll 二进制 patch — 3 处验证函数 `mov eax,1; ret`
+4. ✅ 32/64 位内核 junction 兼容
+5. ✅ ziniao_standalone_v5.py 一键启动
+6. ✅ **浏览器 3 个进程持续运行，完全脱离官方服务器**
 
 **env-kit Go 符号分析** (V2.29.19, go1.20.14):
 - 完整源码结构: `env-kit-neo/internal/` (browsermanager/conf/context/envkit/ipc/model/module/...)
