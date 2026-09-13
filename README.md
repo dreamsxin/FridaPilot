@@ -579,12 +579,17 @@ fridapilot/
 - ✅ 32位/64位内核路径 junction 解决 `chrome_32_*` 路径不存在问题
 - ✅ **ziniaobrowser.exe 首次成功启动！** (exec browser success, pid 出现)
 - ❌ exit 10009 (Token 验证失败) — init.json 中 token 字段全为空
-- ✅ **chrome.dll 二进制 patch 方案** — 直接 patch 3 个验证函数为 `mov eax,1; ret`，无需 Frida
-  - `0x32243b0` Token verify (exit 10009)
-  - `0x320bc20` Startup verify (exit 10001)
-  - `0x32428f0` License check (exit 10002)
-- ✅ **浏览器完全单机启动成功！** 3 个进程持续运行，无异常退出
-- env-kit + mock server + patched chrome.dll = 完整脱离官方服务器运行
+- ✅ **chrome.dll 精确条件跳转 patch** — 只修改 3 个条件跳转指令（共 13 字节），验证函数正常执行
+  - `0x30e94f9`: `jnz` → `jmp` (token verify, 1 byte)
+  - `0x30e8fac`: `jz` → 6x NOP (startup verify, 6 bytes)
+  - `0x3cd756`: `jz` → 6x NOP (license check, 6 bytes)
+- ✅ **init.json 实时拦截** — watchdog FileSystemWatcher 拦截 env-kit 写入的 init.json，在 chrome 读取前修改关键字段
+  - `async_proxy_data: 0` (禁用代理等待)
+  - `black_white_list.type: 0` (放开所有 URL)
+  - `proxy: null` (直连模式)
+  - 完善 window/webgl/accept_languages 等配置
+- ✅ **浏览器 UI 完整渲染** — chrome://newtab 页面正常显示，地址栏/标签页/工具栏完整
+- ⏳ 页面导航待完善 — 需要通过内核 IPC 或 CDP 实现程序化导航
 
 **最终单机启动方案**（已完全验证）：
 1. ✅ Mock API Server (HTTPS:18443) — protojson snake_case 格式响应
