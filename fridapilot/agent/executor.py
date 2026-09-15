@@ -43,6 +43,7 @@ def _register_tools() -> None:
         return
 
     from fridapilot.tools import recon, injector, observer, script_forge, bypass, crypto_reverse
+    from fridapilot.tools import binary_analysis
 
     TOOL_REGISTRY.update({
         "recon.list_processes": recon.list_processes,
@@ -61,6 +62,14 @@ def _register_tools() -> None:
         "bypass.get_anti_debug_script": bypass.get_anti_debug_script,
         "crypto_reverse.scan_binary": crypto_reverse.scan_binary,
         "crypto_reverse.get_bcrypt_hook_script": crypto_reverse.get_bcrypt_hook_script,
+        # Static binary analysis tools
+        "binary_analysis.analyze_pe": binary_analysis.analyze_pe,
+        "binary_analysis.analyze_elf": binary_analysis.analyze_elf,
+        "binary_analysis.disassemble": binary_analysis.disassemble,
+        "binary_analysis.find_strings": binary_analysis.find_strings,
+        "binary_analysis.search_bytes": binary_analysis.search_bytes,
+        "binary_analysis.xrefs_to": binary_analysis.xrefs_to,
+        "binary_analysis.analyze_go_binary": binary_analysis.analyze_go_binary,
     })
 
 

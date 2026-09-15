@@ -31,7 +31,9 @@ Tool Layer（纯 Python，无需 LLM）
   ├─ Injector       attach/spawn/inject/detach
   ├─ Observer       send/console/错误/性能收集
   ├─ Dump Tools     内存、字符串、对象图
-  └─ Bypass Tools   反调试、SSL pinning 绕过
+  ├─ Bypass Tools   反调试、SSL pinning 绕过
+  ├─ Crypto Reverse 二进制加密逆向（6 级模型）
+  └─ Binary Analysis PE/ELF 解析、反汇编、Go 分析
         │
         ▼
 Frida Core
@@ -104,6 +106,13 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp crypto hook-bcrypt` | Hook Windows BCrypt API 捕获运行时密钥 | ❌ |
 | `fp crypto bruteforce` | 暴力搜索二进制中的 AES 密钥 | ❌ |
 | `fp crypto xor` | XOR 反混淆（单字节爆破 / 已知明文 / 已知密钥） | ❌ |
+| `fp binary analyze-pe <file>` | PE 文件完整分析（header/section/import/export） | ❌ |
+| `fp binary analyze-elf <file>` | ELF 文件完整分析（header/section/symbol） | ❌ |
+| `fp binary disassemble` | 指定偏移反汇编（自动检测架构） | ❌ |
+| `fp binary find-strings <file>` | 增强字符串提取（ASCII/UTF-16LE/UTF-8） | ❌ |
+| `fp binary search-bytes <file> <pattern>` | 字节模式搜索（支持 `??` 通配符） | ❌ |
+| `fp binary xrefs --address <addr>` | 交叉引用查找（CALL/JMP） | ❌ |
+| `fp binary analyze-go <file>` | Go 二进制分析（版本/包/函数/源码路径） | ❌ |
 | `fp run "<自然语言>"` | AI Agent 闭环执行任务 | ✅ |
 
 ---
@@ -151,6 +160,45 @@ Tool Layer 是 FridaPilot 的核心基础，**纯 Python 实现、无 LLM 依赖
 - SSL Pinning 绕过（多种方案）
 - 反调试检测绕过
 - 反 Frida 检测绕过
+
+### Binary Analysis — 静态二进制分析（Phase 4 新增）
+
+基于 pefile / pyelftools / capstone 的离线二进制分析工具，借鉴 binary-mcp、GhidraMCP、Capstone MCP 的设计：
+
+```bash
+# PE 文件分析
+fp binary analyze-pe target.dll
+fp binary analyze-pe target.dll --json
+
+# ELF 文件分析
+fp binary analyze-elf target_binary
+
+# 反汇编（自动检测架构）
+fp binary disassemble target.dll --address 0x30e94f0 --count 30
+
+# 增强字符串提取（ASCII + UTF-16LE + UTF-8）
+fp binary find-strings target.exe --filter "encrypt"
+fp binary find-strings target.exe --encoding utf16le --min-len 6
+
+# 字节模式搜索（支持 ?? 通配符）
+fp binary search-bytes target.dll "4883ec20"
+fp binary search-bytes target.dll "48 8b ?? 48 89"
+
+# 交叉引用查找
+fp binary xrefs target.dll --address 0x320bc20
+
+# Go 二进制分析（提取版本/包/函数/源码路径）
+fp binary analyze-go ipc-server.exe
+```
+
+功能：
+- PE header/section/import/export 完整解析 + .NET 检测 + PDB 路径
+- ELF header/section/symbol/dynamic_libs 解析
+- 多架构反汇编（x86/x64/ARM/ARM64，自动检测）
+- 三编码字符串提取 + 关键词过滤
+- 字节模式搜索（支持 `??` 通配符，类似 IDA 搜索）
+- CALL/JMP 交叉引用分析
+- Go 二进制元数据提取（版本、包路径、函数列表、源码文件）
 
 ### Crypto Reverse — 二进制加密逆向分析
 
@@ -322,22 +370,39 @@ fp inject --target YourApp.exe --script fridapilot/templates/electron/hardening_
 FridaPilot 暴露标准 MCP 工具，可被 Claude Desktop、Cursor、自研 Agent 等直接调用：
 
 ```text
+# ── 动态分析（Frida）──
 frida_list_processes      # 列出进程
-frida_attach              # Attach 到进程
-frida_spawn               # Spawn 启动应用
-frida_detach              # 断开会话
-frida_enumerate_modules   # 枚举模块
-frida_enumerate_classes   # 枚举类
-frida_enumerate_methods   # 枚举方法
+frida_enumerate_modules   # 枚举模块（分页）
+frida_enumerate_classes   # 枚举类（分页）
+frida_enumerate_methods   # 枚举方法（分页）
+frida_enumerate_exports   # 枚举导出符号（分页）
 frida_inject_script       # 注入脚本
-frida_collect_messages    # 收集消息
 frida_generate_script     # 从模板生成脚本
-frida_dump_memory         # Dump 内存
 frida_bypass_ssl          # 绕过 SSL Pinning
 frida_crypto_scan         # 扫描二进制加密指标
 frida_crypto_hook_bcrypt  # Hook BCrypt API 捕获密钥
-frida_report              # 生成报告
+frida_hook_function       # 声明式 Hook（自动生成 Interceptor）
+frida_hook_batch          # 批量 Hook 多个函数
+frida_read_memory         # 读取进程内存
+frida_write_memory        # 写入进程内存
+frida_search_memory       # 内存模式搜索
+frida_call_function       # 调用目标进程函数
+
+# ── 静态二进制分析 ──
+binary_analyze_pe         # PE 文件完整分析
+binary_analyze_elf        # ELF 文件完整分析
+binary_disassemble        # 反汇编（自动检测架构）
+binary_find_strings       # 增强字符串提取
+binary_search_bytes       # 字节模式搜索（?? 通配符）
+binary_xrefs              # 交叉引用查找
+binary_analyze_go         # Go 二进制分析
 ```
+
+生产级特性：
+- **分页**：所有枚举工具支持 offset/limit 分页
+- **路径白名单**：`FRIDAPILOT_ALLOWED_DIRS` 环境变量限制可分析目录
+- **审计日志**：所有 MCP 工具调用自动记录
+- **标准化响应**：统一 `{success, data, error, duration}` 格式
 
 ## Agent 工作流（需要 LLM）
 
@@ -386,6 +451,7 @@ fridapilot/
 │   ├── observe.py      # fp observe
 │   ├── bypass.py       # fp bypass
 │   ├── crypto.py       # fp crypto scan / hook-bcrypt
+│   ├── binary.py       # fp binary analyze-pe/elf/go / disassemble / strings / search
 │   ├── report.py       # fp report
 │   └── run.py          # fp run（需要 LLM）
 ├── tools/              # Tool Layer（纯 Python，无 LLM 依赖）
@@ -395,7 +461,8 @@ fridapilot/
 │   ├── observer.py     # 消息收集与统计
 │   ├── dump.py         # 内存/字符串/对象图
 │   ├── bypass.py       # SSL pinning / 反调试 / 反 Frida
-│   └── crypto_reverse.py # 二进制加密逆向分析（6 级保护模型）
+│   ├── crypto_reverse.py # 二进制加密逆向分析（6 级保护模型）
+│   └── binary_analysis.py # PE/ELF 解析、反汇编、Go 分析、字节搜索
 ├── templates/          # 内置 Frida 脚本模板
 │   ├── android/        # Android: comprehensive.js + hardening_bypass.js
 │   ├── ios/            # iOS: comprehensive.js + hardening_bypass.js
@@ -419,6 +486,7 @@ fridapilot/
 │   ├── executor.py     # 工具调度执行
 │   ├── reflector.py    # 错误诊断与修复
 │   ├── memory.py       # 历史记忆与知识复用
+│   ├── prompts.py      # 任务专用 prompt 模板（漏洞/加密/命名/解释）
 │   └── reporter.py     # 报告生成
 ├── mcp/                # MCP Server
 │   └── server.py
@@ -437,6 +505,7 @@ fridapilot/
 - **数据校验**：Pydantic
 - **存储**：SQLite + SQLModel
 - **MCP**：MCP Python SDK
+- **静态分析**：pefile、pyelftools、capstone
 - **LLM**（可选）：LiteLLM（兼容 OpenAI / Claude / 本地模型）
 - **Agent**（可选）：自研 Planner / Executor / Reflector
 
@@ -457,9 +526,12 @@ fridapilot/
 
 - **闭环自动化**：生成 → 注入 → 观测 → 修复，不只是单次脚本生成
 - **运行时上下文感知**：先侦察再生成，减少 LLM 幻觉
-- **MCP 标准化**：可被 Claude Desktop / Cursor / 任意 Agent 调用
-- **Electron / Node / 移动端统一支持**
+- **静态 + 动态一体化**：PE/ELF 静态分析 + Frida 动态 Hook，同一工具链覆盖完整 RE 流程
+- **MCP 标准化**：23+ MCP 工具，可被 Claude Desktop / Cursor / 任意 Agent 调用
+- **生产级安全**：路径白名单、审计日志、标准化错误响应
+- **Electron / Node / 移动端 / Go 统一支持**
 - **CLI-first**：无 LLM 也能完成完整工作流，安全人员即插即用
+- **AI prompt 模板**：内置漏洞分析、加密分析、函数命名、协议逆向等专用模板
 
 ---
 
@@ -469,11 +541,14 @@ fridapilot/
 2. **Phase 1.5 — 二进制加密逆向** ✅ 已完成
 3. **Phase 2 — MCP Server** ✅ 已完成
 4. **Phase 3 — AI Agent 闭环** ✅ 已完成
-5. **Phase 4 — 生产级工具升级**（进行中）
-   - 借鉴 AI 逆向工具生态（GhidraMCP/r2ai/binary-mcp 等）
-   - 新增二进制分析 MCP 工具（反汇编/Go符号提取/Named Pipe协议分析）
-   - 集成 antidetect-browser 逆向成果（envkit_compat/standalone_gateway/指纹种子控制）
-   - MCP 工具扩展：PE分析、IPC协议嗅探、init.json构建器
+5. **Phase 4 — 生产级工具升级** ✅ 已完成
+   - 借鉴 AI 逆向工具生态（GhidraMCP/r2ai/binary-mcp/Capstone MCP/sentinel-reverse）
+   - 新增静态二进制分析工具层（PE/ELF/反汇编/字符串/字节搜索/交叉引用/Go 分析）
+   - MCP 工具 10→23+：新增 binary_analyze_pe/elf/go、binary_disassemble/find_strings/search_bytes/xrefs、frida_hook_function/batch、frida_read/write/search_memory、frida_call_function
+   - 所有枚举工具支持分页（offset/limit）
+   - 路径白名单（FRIDAPILOT_ALLOWED_DIRS）、审计日志、标准化响应格式
+   - Agent prompt 模板系统（analyze_vulns/analyze_crypto/auto_name/explain_function/analyze_protocol）
+   - Planner 感知全部新工具，支持静态+动态混合分析任务
 6. **Phase 5 — Web UI 与生态**
    - 进程发现、attach/spawn/detach
    - 脚本注入、消息收集

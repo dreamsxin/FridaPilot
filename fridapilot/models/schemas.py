@@ -53,3 +53,98 @@ class ClassInfo(BaseModel):
     """Information about a runtime class (Java/ObjC)."""
     name: str
     methods: list[str] = Field(default_factory=list)
+
+
+# ── Binary analysis models ────────────────────────────────────
+
+
+class SectionInfo(BaseModel):
+    """PE/ELF section information."""
+    name: str
+    virtual_address: int = 0
+    virtual_size: int = 0
+    raw_size: int = 0
+    entropy: float = 0.0
+    characteristics: str = ""
+
+
+class ImportEntry(BaseModel):
+    """Imported function."""
+    dll: str = ""
+    name: str = ""
+    ordinal: int | None = None
+
+
+class PEAnalysis(BaseModel):
+    """Result of PE binary analysis."""
+    filepath: str
+    is_64bit: bool = False
+    is_dotnet: bool = False
+    is_dll: bool = False
+    machine: str = ""
+    timestamp: int = 0
+    entry_point: int = 0
+    image_base: int = 0
+    sections: list[SectionInfo] = Field(default_factory=list)
+    imports: list[ImportEntry] = Field(default_factory=list)
+    exports: list[str] = Field(default_factory=list)
+    debug_info: dict[str, Any] = Field(default_factory=dict)
+
+
+class ELFAnalysis(BaseModel):
+    """Result of ELF binary analysis."""
+    filepath: str
+    is_64bit: bool = False
+    is_pie: bool = False
+    machine: str = ""
+    entry_point: int = 0
+    sections: list[SectionInfo] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
+    dynamic_libs: list[str] = Field(default_factory=list)
+
+
+class DisassemblyLine(BaseModel):
+    """A single disassembly instruction."""
+    address: int
+    mnemonic: str
+    op_str: str
+    bytes_hex: str
+
+
+class DisassemblyResult(BaseModel):
+    """Result of disassembling a region."""
+    start_address: int
+    instructions: list[DisassemblyLine] = Field(default_factory=list)
+    architecture: str = ""
+    mode: str = ""
+
+
+class StringMatch(BaseModel):
+    """A string found in a binary."""
+    offset: int
+    value: str
+    encoding: str = "ascii"
+
+
+class ByteMatch(BaseModel):
+    """A byte pattern match in a binary."""
+    offset: int
+    matched_bytes: str  # hex representation
+
+
+class XrefResult(BaseModel):
+    """Cross-reference to a target address."""
+    from_address: int
+    instruction: str = ""
+    xref_type: str = "call"  # call / jump / data
+
+
+class GoAnalysis(BaseModel):
+    """Result of Go binary analysis."""
+    filepath: str
+    go_version: str = ""
+    build_info: str = ""
+    packages: list[str] = Field(default_factory=list)
+    functions: list[str] = Field(default_factory=list)
+    strings_sample: list[str] = Field(default_factory=list)
+    source_files: list[str] = Field(default_factory=list)

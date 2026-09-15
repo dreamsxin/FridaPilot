@@ -16,6 +16,9 @@ dependencies = [
     "rich>=13.0.0",
     "pydantic>=2.0.0",
     "cryptography>=41.0.0",
+    "pefile>=2023.2.7",
+    "pyelftools>=0.29",
+    "capstone>=5.0.0",
 ]
 
 [project.optional-dependencies]
