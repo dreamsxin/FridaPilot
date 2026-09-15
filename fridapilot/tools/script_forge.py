@@ -13,6 +13,7 @@ TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
 # Registry of built-in template names
 TEMPLATE_REGISTRY: dict[str, str] = {
+    # ── Generic templates ──
     "java-hook": "java_hook.js",
     "objc-hook": "objc_hook.js",
     "native-hook": "native_hook.js",
@@ -20,6 +21,22 @@ TEMPLATE_REGISTRY: dict[str, str] = {
     "crypto-monitor": "crypto_monitor.js",
     "electron-ipc": "electron_ipc.js",
     "node-hook": "node_hook.js",
+    # ── Android ──
+    "android-comprehensive": "android/comprehensive.js",
+    "android-hardening-bypass": "android/hardening_bypass.js",
+    # ── iOS ──
+    "ios-comprehensive": "ios/comprehensive.js",
+    "ios-hardening-bypass": "ios/hardening_bypass.js",
+    # ── Windows ──
+    "windows-comprehensive": "windows/comprehensive.js",
+    "windows-hardening-bypass": "windows/hardening_bypass.js",
+    # ── macOS ──
+    "macos-comprehensive": "macos/comprehensive.js",
+    # ── Linux ──
+    "linux-comprehensive": "linux/comprehensive.js",
+    # ── Electron ──
+    "electron-comprehensive": "electron/comprehensive.js",
+    "electron-hardening-bypass": "electron/hardening_bypass.js",
 }
 
 

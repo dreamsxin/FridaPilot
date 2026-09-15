@@ -82,6 +82,18 @@ CREATE INDEX IF NOT EXISTS idx_scripts_target ON scripts(target);
 CREATE INDEX IF NOT EXISTS idx_scripts_tags ON scripts(tags);
 CREATE INDEX IF NOT EXISTS idx_hook_points_target ON hook_points(target);
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
+
+CREATE TABLE IF NOT EXISTS analysis_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL UNIQUE,
+    filepath TEXT NOT NULL,
+    analysis_type TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_cache_hash ON analysis_cache(file_hash);
 """
 
 
@@ -231,3 +243,64 @@ class Database:
                 (task_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ── Analysis Cache ────────────────────────────────────
+
+    def get_cached_analysis(self, file_hash: str, analysis_type: str) -> dict | None:
+        """Look up a cached binary analysis result by file hash and type.
+
+        Args:
+            file_hash: SHA-256 hash of the binary file.
+            analysis_type: Type of analysis (e.g. "pe", "elf", "go", "crypto").
+
+        Returns:
+            Cached result dict or None if not found.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_cache WHERE file_hash=? AND analysis_type=?",
+                (file_hash, analysis_type),
+            ).fetchone()
+            if row:
+                result = dict(row)
+                result["result"] = json.loads(result["result_json"])
+                return result
+            return None
+
+    def save_analysis_cache(
+        self, file_hash: str, filepath: str, analysis_type: str,
+        result: dict, file_size: int = 0,
+    ) -> None:
+        """Cache a binary analysis result.
+
+        Args:
+            file_hash: SHA-256 hash of the binary file.
+            filepath: Original file path (for display).
+            analysis_type: Type of analysis.
+            result: Analysis result dict to cache.
+            file_size: Size of the analyzed file in bytes.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO analysis_cache "
+                "(file_hash, filepath, analysis_type, result_json, file_size, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (file_hash, filepath, analysis_type,
+                 json.dumps(result, default=str), file_size, time.time()),
+            )
+
+    def clear_analysis_cache(self, older_than_days: int = 30) -> int:
+        """Remove stale cache entries.
+
+        Args:
+            older_than_days: Remove entries older than this many days.
+
+        Returns:
+            Number of entries removed.
+        """
+        cutoff = time.time() - (older_than_days * 86400)
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM analysis_cache WHERE created_at < ?", (cutoff,),
+            )
+            return cur.rowcount
