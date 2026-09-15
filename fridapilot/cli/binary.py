@@ -268,3 +268,139 @@ def analyze_go_cmd(
             console.print(f"  {fn}")
         if len(result.functions) > 30:
             console.print(f"  ... and {len(result.functions) - 30} more")
+
+
+@binary_app.command("analyze")
+def analyze_cmd(
+    binary: str = typer.Argument(..., help="Path to binary file (PE/ELF)."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Comprehensive one-shot analysis: PE/ELF + crypto scan + strings + Go detection.
+
+    Automatically detects binary type and runs all relevant analysis tools,
+    producing a combined report. This is the most common RE workflow.
+    """
+    import json as json_mod
+    from pathlib import Path as _Path
+
+    filepath = _Path(binary)
+    if not filepath.exists():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+    data = filepath.read_bytes()
+    combined: dict = {"filepath": str(filepath), "analyses": []}
+
+    console.print(Panel(f"[bold]{binary}[/bold]", title="Comprehensive Binary Analysis"))
+
+    # ── 1. PE or ELF analysis ──
+    is_pe = data[:2] == b"MZ"
+    is_elf = data[:4] == b"\x7fELF"
+
+    if is_pe:
+        from fridapilot.tools.binary_analysis import analyze_pe
+        console.print("\n[cyan]1. PE Analysis[/cyan]")
+        pe_result = analyze_pe(binary)
+        combined["pe"] = pe_result.model_dump()
+        combined["analyses"].append("pe")
+
+        info = Table(show_header=False)
+        info.add_row("Machine", pe_result.machine)
+        info.add_row("Arch", "x64" if pe_result.is_64bit else "x86")
+        info.add_row("Type", "DLL" if pe_result.is_dll else "EXE")
+        info.add_row(".NET", "Yes" if pe_result.is_dotnet else "No")
+        info.add_row("Entry Point", f"0x{pe_result.entry_point:x}")
+        info.add_row("Sections", str(len(pe_result.sections)))
+        info.add_row("Imports", str(len(pe_result.imports)))
+        info.add_row("Exports", str(len(pe_result.exports)))
+        console.print(info)
+
+        if pe_result.debug_info.get("pdb_path"):
+            console.print(f"  PDB: {pe_result.debug_info['pdb_path']}")
+
+    elif is_elf:
+        from fridapilot.tools.binary_analysis import analyze_elf
+        console.print("\n[cyan]1. ELF Analysis[/cyan]")
+        elf_result = analyze_elf(binary)
+        combined["elf"] = elf_result.model_dump()
+        combined["analyses"].append("elf")
+
+        info = Table(show_header=False)
+        info.add_row("Machine", str(elf_result.machine))
+        info.add_row("Arch", "x64" if elf_result.is_64bit else "x86/Other")
+        info.add_row("PIE", "Yes" if elf_result.is_pie else "No")
+        info.add_row("Symbols", str(len(elf_result.symbols)))
+        info.add_row("Dynamic Libs", str(len(elf_result.dynamic_libs)))
+        console.print(info)
+    else:
+        console.print("[yellow]  Unknown binary format (not PE or ELF)[/yellow]")
+
+    # ── 2. Crypto scan ──
+    from fridapilot.tools.crypto_reverse import scan_binary
+    console.print("\n[cyan]2. Crypto Scan[/cyan]")
+    crypto = scan_binary(binary)
+    combined["crypto"] = {
+        "sbox_count": len(crypto.sbox_offsets),
+        "crypto_imports": crypto.crypto_imports,
+        "crypto_strings_count": len(crypto.crypto_strings),
+        "hex_key_candidates": crypto.hex_key_candidates[:5],
+        "protection_level": {
+            "level": crypto.protection_level.level,
+            "label": crypto.protection_level.label,
+            "confidence": crypto.protection_level.confidence,
+        } if crypto.protection_level else None,
+    }
+    combined["analyses"].append("crypto")
+
+    if crypto.protection_level:
+        pl = crypto.protection_level
+        color = {"HIGH": "red", "MEDIUM": "yellow", "LOW": "green"}.get(pl.confidence, "white")
+        console.print(f"  Protection Level: [bold]L{pl.level} - {pl.label}[/bold] [{color}]({pl.confidence})[/{color}]")
+    if crypto.crypto_imports:
+        console.print(f"  Crypto APIs: {', '.join(crypto.crypto_imports[:10])}")
+    if crypto.sbox_offsets:
+        console.print(f"  AES S-Box: {len(crypto.sbox_offsets)} found")
+    if crypto.hex_key_candidates:
+        console.print(f"  Hex key candidates: {len(crypto.hex_key_candidates)}")
+
+    # ── 3. Go binary detection ──
+    import re as _re
+    go_marker = _re.search(rb"go1\.\d+", data)
+    if go_marker:
+        from fridapilot.tools.binary_analysis import analyze_go_binary
+        console.print("\n[cyan]3. Go Binary Analysis[/cyan]")
+        go_result = analyze_go_binary(binary)
+        combined["go"] = go_result.model_dump()
+        combined["analyses"].append("go")
+
+        console.print(f"  Go Version: {go_result.go_version}")
+        console.print(f"  Packages: {len(go_result.packages)}")
+        console.print(f"  Functions: {len(go_result.functions)}")
+        console.print(f"  Source Files: {len(go_result.source_files)}")
+    else:
+        console.print("\n[dim]3. Go Binary: Not detected[/dim]")
+
+    # ── 4. Key strings ──
+    from fridapilot.tools.binary_analysis import find_strings
+    console.print("\n[cyan]4. Notable Strings[/cyan]")
+    strings = find_strings(binary, min_len=6, encoding="all", limit=500)
+    # Filter for interesting patterns
+    interesting_kw = ["encrypt", "decrypt", "password", "token", "secret",
+                      "key", "license", "verify", "auth", "pipe", "ipc",
+                      "http", "api", "cert", "sign", "hash", "aes", "rsa"]
+    notable = [s for s in strings if any(kw in s.value.lower() for kw in interesting_kw)]
+    combined["notable_strings"] = [{"offset": s.offset, "value": s.value} for s in notable[:30]]
+    combined["analyses"].append("strings")
+
+    console.print(f"  Total strings: {len(strings)}")
+    console.print(f"  Notable (security-related): {len(notable)}")
+    for s in notable[:15]:
+        console.print(f"    0x{s.offset:08x}  {s.value[:100]}")
+    if len(notable) > 15:
+        console.print(f"    ... and {len(notable) - 15} more")
+
+    # ── Summary ──
+    console.print(f"\n[bold green]Analysis complete.[/bold green] Ran: {', '.join(combined['analyses'])}")
+
+    if json_output:
+        console.print(json_mod.dumps(combined, indent=2, default=str))

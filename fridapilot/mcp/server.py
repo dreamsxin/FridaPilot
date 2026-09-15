@@ -93,6 +93,44 @@ TOOLS = [
         },
     ),
     Tool(
+        name="frida_attach",
+        description="Attach to a running process by name or PID. Returns session info.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Process name or PID"},
+                "device": {"type": "string", "default": "local"},
+                "host": {"type": "string", "default": ""},
+            },
+            "required": ["target"],
+        },
+    ),
+    Tool(
+        name="frida_spawn",
+        description="Spawn an application and attach. Returns session info. Call frida_inject_script next.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "package": {"type": "string", "description": "Package name or executable path"},
+                "device": {"type": "string", "default": "local"},
+                "host": {"type": "string", "default": ""},
+            },
+            "required": ["package"],
+        },
+    ),
+    Tool(
+        name="frida_detach",
+        description="Detach from the current session and unload all scripts.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Process name or PID of active session"},
+                "device": {"type": "string", "default": "local"},
+            },
+            "required": ["target"],
+        },
+    ),
+    Tool(
         name="frida_enumerate_modules",
         description="Enumerate loaded modules in a target process. Supports pagination.",
         inputSchema={
@@ -521,6 +559,24 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
         from fridapilot.tools.recon import list_processes
         procs = list_processes(device_type, host)
         return [{"pid": p.pid, "name": p.name} for p in procs]
+
+    if name == "frida_attach":
+        from fridapilot.tools.injector import attach
+        target = _resolve_target(arguments["target"])
+        session = attach(target, device_type, host)
+        return {"pid": session.pid, "target": session.target, "device": session.device_type.value}
+
+    if name == "frida_spawn":
+        from fridapilot.tools.injector import spawn
+        session = spawn(arguments["package"], device_type, host)
+        return {"pid": session.pid, "target": session.target, "device": session.device_type.value, "note": "Process is suspended. Use frida_inject_script then resume."}
+
+    if name == "frida_detach":
+        from fridapilot.tools.injector import attach, detach
+        target = _resolve_target(arguments["target"])
+        session = attach(target, device_type, host)
+        detach(session)
+        return {"status": "detached", "target": str(target)}
 
     if name == "frida_enumerate_modules":
         from fridapilot.tools.injector import attach, detach
