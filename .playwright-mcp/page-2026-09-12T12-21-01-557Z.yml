@@ -1,0 +1,28 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e5]:
+    - generic [ref=f1e6]:
+      - strong [ref=f1e7]: 第 1 座 · 三阶
+      - generic [ref=f1e8]: 同在第 1 层
+    - generic [ref=f1e9]:
+      - strong [ref=f1e10]: 0 / 2
+      - generic [ref=f1e11]: 推移步数
+    - generic [ref=f1e12]:
+      - strong [ref=f1e19]: "0"
+      - generic [ref=f1e20]: 已爬 0 层
+  - group "观察视角" [ref=f1e21]:
+    - button "俯视" [pressed] [ref=f1e22] [cursor=pointer]
+    - button "侧视" [ref=f1e23] [cursor=pointer]
+    - button "转台" [ref=f1e24] [cursor=pointer]
+  - paragraph [ref=f1e25]: 出口就在这一层：横滑推整行，竖滑推整列，把门对上
+  - generic [ref=f1e26]:
+    - generic [ref=f1e27]: 第 1 层
+    - generic [ref=f1e28]:
+      - button "看上一层" [ref=f1e29] [cursor=pointer]
+      - button "看下一层" [ref=f1e32] [cursor=pointer]
+  - paragraph [ref=f1e35]: 横滑推行 · 竖滑推列
+  - contentinfo [ref=f1e36]:
+    - button "撤销" [ref=f1e37] [cursor=pointer]
+    - button "提示" [ref=f1e41] [cursor=pointer]
+    - button "重开这一座" [ref=f1e44] [cursor=pointer]
+    - button "音效已开" [ref=f1e48] [cursor=pointer]
+    - button "玩法" [ref=f1e53] [cursor=pointer]

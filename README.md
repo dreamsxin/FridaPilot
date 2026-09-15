@@ -466,6 +466,15 @@ fridapilot/
 ## 路线图
 
 1. **Phase 1 — Frida 工具层 + CLI** ✅ 已完成
+2. **Phase 1.5 — 二进制加密逆向** ✅ 已完成
+3. **Phase 2 — MCP Server** ✅ 已完成
+4. **Phase 3 — AI Agent 闭环** ✅ 已完成
+5. **Phase 4 — 生产级工具升级**（进行中）
+   - 借鉴 AI 逆向工具生态（GhidraMCP/r2ai/binary-mcp 等）
+   - 新增二进制分析 MCP 工具（反汇编/Go符号提取/Named Pipe协议分析）
+   - 集成 antidetect-browser 逆向成果（envkit_compat/standalone_gateway/指纹种子控制）
+   - MCP 工具扩展：PE分析、IPC协议嗅探、init.json构建器
+6. **Phase 5 — Web UI 与生态**
    - 进程发现、attach/spawn/detach
    - 脚本注入、消息收集
    - 模块/类/方法枚举
