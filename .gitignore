@@ -20,3 +20,9 @@ cases/
 # Decrypted output files
 *_decrypted.*
 .commitmsg
+
+# Playwright MCP logs
+.playwright-mcp/
+
+# Temporary files
+*.tmp
