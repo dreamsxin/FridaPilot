@@ -454,7 +454,7 @@ def analyze_go_binary(filepath: str | Path) -> GoAnalysis:
 
     Go binaries embed rich metadata: build info, package paths, function names,
     and source file paths. This is invaluable for reverse engineering Go IPC
-    servers like ipc-server.exe.
+    servers and service binaries.
 
     Args:
         filepath: Path to the Go binary (PE or ELF).

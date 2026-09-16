@@ -1,7 +1,7 @@
 """Prompt Templates - Task-specific LLM prompts for reverse engineering analysis.
 
 Inspired by r2ai's named prompt template system and real-world RE experience
-from the antidetect browser project (Electron + Go IPC + custom Chromium kernel).
+from real-world antidetect browser RE (Electron + Go IPC + custom Chromium kernel).
 
 Each template encodes hard-won lessons:
 - Static analysis before dynamic hooking
@@ -212,7 +212,7 @@ protocol based on captured messages and binary analysis.
 ## Real-World Lessons (from Named Pipe IPC + Electron + Go RE)
 - Named Pipe IPC often has a HANDSHAKE phase: Init message (encrypted) -> Status response -> \
   operational messages. Identify the handshake before analyzing data flow.
-- Pipe names may be hardcoded with validation (e.g., must start with "appprefix"). \
+- Pipe names may be hardcoded with validation (e.g., must start with a specific prefix). \
   Check for string comparisons on pipe names in the binary.
 - IPC encryption often uses a DIFFERENT key per message type (e.g., NATIVE_STARTINFO vs NATIVE_IPC). \
   Each crypto mode constant maps to a separate AES key.
