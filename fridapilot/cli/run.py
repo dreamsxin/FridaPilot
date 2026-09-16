@@ -9,6 +9,9 @@ from rich.table import Table
 
 console = Console()
 
+# Available analysis modes for --analyze
+ANALYZE_MODES = ["vulns", "crypto", "protocol", "electron", "validation"]
+
 
 def run_cmd(
     goal: str = typer.Argument(..., help="Natural language task description."),
@@ -18,8 +21,17 @@ def run_cmd(
     output: str = typer.Option("", "--output", "-o", help="Save report to file."),
     max_retries: int = typer.Option(3, "--retries", help="Max retry rounds on failure."),
     report_format: str = typer.Option("md", "--format", "-f", help="Report format: md, json."),
+    analyze: str = typer.Option("", "--analyze", "-a",
+        help="AI analysis mode on collected data: vulns, crypto, protocol, electron, validation. "
+             "Runs the task, then sends results through the specified analysis prompt template."),
 ) -> None:
-    """AI Agent: plan, execute, observe, fix, report - all from natural language."""
+    """AI Agent: plan, execute, observe, fix, report - all from natural language.
+
+    Use --analyze to run a specialized AI analysis after execution:
+      fp run "hook BCrypt APIs" --target app.exe --analyze crypto
+      fp run "monitor IPC" --target app.exe --analyze protocol
+      fp run "analyze Electron app" --target app.exe --analyze electron
+    """
     try:
         import litellm  # noqa: F401
     except ImportError:
@@ -27,7 +39,11 @@ def run_cmd(
         console.print("  pip install fridapilot[agent]")
         raise typer.Exit(1)
 
-    asyncio.run(_run_agent(goal, target, device, host, output, max_retries, report_format))
+    if analyze and analyze not in ANALYZE_MODES:
+        console.print(f"[red]Unknown analyze mode '{analyze}'. Available: {', '.join(ANALYZE_MODES)}[/red]")
+        raise typer.Exit(1)
+
+    asyncio.run(_run_agent(goal, target, device, host, output, max_retries, report_format, analyze))
 
 
 async def _run_agent(
@@ -38,6 +54,7 @@ async def _run_agent(
     output: str,
     max_retries: int,
     report_format: str,
+    analyze: str = "",
 ) -> None:
     """Async agent execution loop."""
     from fridapilot.agent.planner import create_plan
@@ -106,3 +123,117 @@ async def _run_agent(
         console.print(f"[green]Report saved to {output}[/green]")
     else:
         console.print(report)
+
+    # Phase 5: AI Analysis (optional --analyze mode)
+    if analyze:
+        console.print(f"\n[bold cyan]Phase 5: AI Analysis ({analyze})...[/bold cyan]")
+        await _run_analysis(analyze, plan, results, ctx, target, output)
+
+
+# ── Analyze mode: prompt template → LLM ──────────────────────
+
+# Map --analyze mode names to prompt template names
+_ANALYZE_MAP = {
+    "vulns": "analyze_vulns",
+    "crypto": "analyze_crypto",
+    "protocol": "analyze_protocol",
+    "electron": "analyze_electron",
+    "validation": "analyze_validation",
+}
+
+
+async def _run_analysis(
+    mode: str,
+    plan,
+    results: list,
+    ctx,
+    target: str,
+    output: str,
+) -> None:
+    """Run AI analysis on collected execution data using prompt templates."""
+    import json as json_mod
+    from litellm import acompletion
+    from fridapilot.agent.prompts import get_prompt
+    from fridapilot.agent.reporter import _safe_str
+
+    template_name = _ANALYZE_MAP.get(mode, mode)
+
+    # Build context from execution results
+    step_results = {}
+    for r in results:
+        if r.success and r.result is not None:
+            step_results[r.tool] = _safe_str(r.result, max_len=2000)
+
+    messages_str = ""
+    if ctx.messages:
+        messages_str = json_mod.dumps(ctx.messages[:50], indent=2, default=str)
+
+    # Collect strings and imports from binary analysis results if available
+    strings_str = step_results.get("binary_analysis.find_strings", "N/A")
+    imports_str = step_results.get("binary_analysis.analyze_pe", "N/A")
+    disasm_str = step_results.get("binary_analysis.disassemble", "N/A")
+    binary_info = step_results.get("binary_analysis.analyze_pe",
+                   step_results.get("binary_analysis.analyze_elf", f"Target: {target}"))
+
+    # Build template context based on mode
+    try:
+        if mode == "vulns":
+            prompt = get_prompt(template_name,
+                binary_info=binary_info, code=disasm_str,
+                imports=imports_str, strings=strings_str)
+        elif mode == "crypto":
+            crypto_scan = step_results.get("crypto_reverse.scan_binary", "N/A")
+            prompt = get_prompt(template_name,
+                crypto_scan=crypto_scan, protection_level="See crypto_scan results",
+                imports=imports_str, strings=strings_str, disassembly=disasm_str)
+        elif mode == "protocol":
+            functions = step_results.get("recon.enumerate_exports",
+                        step_results.get("binary_analysis.analyze_go_binary", "N/A"))
+            prompt = get_prompt(template_name,
+                messages=messages_str, binary_info=binary_info,
+                strings=strings_str, functions=functions)
+        elif mode == "electron":
+            modules = step_results.get("recon.enumerate_modules", "N/A")
+            prompt = get_prompt(template_name,
+                app_info=binary_info, modules=modules,
+                ipc_channels=messages_str, security_config="See modules",
+                strings=strings_str)
+        elif mode == "validation":
+            xrefs = step_results.get("binary_analysis.xrefs_to", "N/A")
+            prompt = get_prompt(template_name,
+                binary_info=binary_info, validation_functions="See disassembly",
+                disassembly=disasm_str, exit_codes="See strings",
+                strings=strings_str)
+        else:
+            console.print(f"[red]Unknown analysis mode: {mode}[/red]")
+            return
+    except KeyError as e:
+        console.print(f"[red]Prompt template error: {e}[/red]")
+        return
+
+    console.print(f"[dim]Sending {len(prompt)} chars to LLM for {mode} analysis...[/dim]")
+
+    response = await acompletion(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"Analyze the data above for target: {target}. "
+                                         f"Goal was: {plan.goal}. Provide actionable findings."},
+        ],
+        temperature=0.2,
+    )
+
+    analysis = response.choices[0].message.content
+    console.print(Panel(analysis, title=f"AI Analysis: {mode}", border_style="cyan"))
+
+    # Save analysis alongside report if output specified
+    if output:
+        analysis_path = output.rsplit(".", 1)[0] + f"_analysis_{mode}.md"
+        from pathlib import Path
+        Path(analysis_path).write_text(
+            f"# FridaPilot AI Analysis: {mode}\n\n"
+            f"Target: {target}\nGoal: {plan.goal}\n\n"
+            f"---\n\n{analysis}\n",
+            encoding="utf-8",
+        )
+        console.print(f"[green]Analysis saved to {analysis_path}[/green]")
