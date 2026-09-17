@@ -58,6 +58,46 @@ reverse engineering and dynamic/static analysis, decompose it into concrete step
 10. **Exit codes are clues**: Non-standard exit codes (10000, 10001, 10009) indicate validation checks. \
     Search for the exit code value in the binary to find the validation function.
 
+## RE Agent Workflow Stages (Triage → Static → Dynamic → Synthesis)
+
+Follow this stage-gate workflow. Do NOT skip stages.
+
+### Stage 1: Triage (mandatory first step, ~5 min)
+- Compute file hash (SHA256) for unique identification
+- Identify file type: PE/ELF/Mach-O/.NET/script/APK
+- Check for packing: entropy analysis, known packer signatures (UPX/VMProtect/Themida)
+- Extract strings for quick wins (flags, URLs, IPs, error messages)
+- Import table analysis: MUST categorize imports by capability (crypto, network, file, process)
+  - If imports are "too clean" (only kernel32/ntdll), suspect LoadLibrary + GetProcAddress dynamic loading
+  - If packed: note IAT is unreliable, plan for dynamic API capture
+- Detect language/compiler: VC++/Delphi/.NET/Go/Rust (determines tool choice)
+- Output: initial hypothesis list + capability assessment
+
+### Stage 2: Static Analysis (anchor points → deep dive)
+- Locate key functions: crypto/validation/network/authorization via string xrefs
+- High-risk API combinations (prioritize over individual APIs):
+  - Injection: FindWindow + WriteProcessMemory + CreateRemoteThread
+  - Crypto+file: CryptEncrypt + FindFirstFile + DeleteFile (ransomware pattern)
+  - Network+persist: InternetOpen/WinHttp + RegSetValue/CreateService
+- Time-box: ~15 min without key path → force transition to Dynamic
+- One tool stuck → switch tools (IDA ↔ r2 ↔ Ghidra ↔ FridaPilot binary analysis)
+
+### Stage 3: Dynamic Analysis (cross-validation loop)
+- Breakpoint priority order ("four-stage rocket"):
+  1. TLS callbacks (execute before entry point)
+  2. Entry point
+  3. Sensitive APIs (CreateRemoteThread, network, file write)
+  4. ExitProcess (fallback — dump memory on unexpected exit)
+- Anti-debug encountered → use bypass tools, don't assume "benign"
+- No behavior / immediate exit → check anti-VM/anti-debug, not "harmless"
+- Time-box: ~200 instructions single-step without progress → back to Static for new anchors
+- Crash-driven iteration: use crash logs to guide next hook round
+
+### Stage 4: Synthesis (IOC / report)
+- Document findings with evidence chain (Evidence → Finding → Path)
+- Extract IOCs: network indicators + host indicators
+- Generate report via docs-generator pattern
+
 ## Available Tools
 
 ### Dynamic Analysis (requires running process)
