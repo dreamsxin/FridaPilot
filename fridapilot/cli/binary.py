@@ -583,6 +583,21 @@ def map_refs_cmd(
     img = PEImage(binary)
     targets: dict[str, int] = {}
 
+    def _put(label: str, rva: int) -> None:
+        """Register one occurrence, keeping every copy of a duplicated literal.
+
+        MSVC does not always pool identical string literals across translation
+        units, so the same switch name can sit at several ``.rdata`` addresses —
+        typically one copy per component (e.g. the browser's copy and the
+        font_data service's copy). Keeping only the first occurrence silently
+        under-reports which functions use that string. Extra copies get a
+        ``name@0xRVA`` label so the grouping stays readable.
+        """
+        if label not in targets:
+            targets[label] = rva
+        elif targets[label] != rva:
+            targets[f"{label}@0x{rva:x}"] = rva
+
     def _add(sv: str) -> None:
         pat = sv.encode("utf-8")
         pos = 0
@@ -593,8 +608,7 @@ def map_refs_cmd(
             pos = i + 1
             rva = img.off_to_rva(i)
             if rva is not None and img.section_of(rva) in (".rdata", ".rodata", ".data"):
-                targets.setdefault(sv, rva)
-                break
+                _put(sv, rva)
 
     for sv in (s.strip() for s in strings.split(",")):
         if sv:
@@ -623,7 +637,8 @@ def map_refs_cmd(
                     label = s.decode("ascii")
                 except UnicodeDecodeError:
                     continue
-                targets.setdefault(label, rva0 + m.start())
+                _put(label, rva0 + m.start())
+
 
     if not targets:
         console.print("[red]No target strings resolved.[/red]")
