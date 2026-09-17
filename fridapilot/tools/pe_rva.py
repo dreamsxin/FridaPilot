@@ -185,7 +185,53 @@ def disassemble_rva(
     return {"image_base": img.image_base, "start_rva": rva, "lines": lines}
 
 
+def function_bounds(
+    binary_path: str | Path,
+    rva: int,
+) -> dict[str, Any] | None:
+    """Exact function bounds for an RVA, read from the x64 ``.pdata`` table.
+
+    Every non-leaf x64 function has a ``RUNTIME_FUNCTION`` entry (12 bytes:
+    BeginAddress / EndAddress / UnwindInfoAddress, all RVAs) used for SEH unwinding.
+    Looking the RVA up there is exact and instant — far better than scanning
+    backwards for ``push rbp`` / ``sub rsp, N``, which is unreliable on optimised
+    code with shrink-wrapped or split prologues.
+
+    The table is sorted by BeginAddress, so this is a binary search.
+
+    Returns {begin_rva, end_rva, size, unwind_info_rva} or None when the RVA is a
+    leaf function (no entry) or outside .pdata coverage.
+    """
+    import struct
+
+    img = PEImage(binary_path)
+    pdata = None
+    for va, vs, praw, rsize, name in img._sections:
+        if name == ".pdata":
+            pdata = (va, min(vs, rsize), praw)
+            break
+    if pdata is None:
+        return None
+    _pva, psize, ppraw = pdata
+    count = psize // 12
+    blob = img._data[ppraw:ppraw + count * 12]
+
+    lo, hi = 0, count - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        begin, end, unwind = struct.unpack_from("<III", blob, mid * 12)
+        if rva < begin:
+            hi = mid - 1
+        elif rva >= end:
+            lo = mid + 1
+        else:
+            return {"begin_rva": begin, "end_rva": end,
+                    "size": end - begin, "unwind_info_rva": unwind}
+    return None
+
+
 def xrefs_to_rva(
+
     binary_path: str | Path,
     target_rva: int,
     scan_start_rva: int,

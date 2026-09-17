@@ -476,7 +476,38 @@ def find_string_rva_cmd(
             console.print(f"  RVA 0x{r['rva']:08x}  off 0x{r['offset']:08x}  {r['needle'][:80]}")
 
 
-@binary_app.command("xrefs-rva")
+@binary_app.command("func-bounds")
+def func_bounds_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file (x64)."),
+    rva: str = typer.Option(..., "--rva", "-r", help="Any RVA inside the function."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Exact function bounds from the x64 .pdata (SEH RUNTIME_FUNCTION) table.
+
+    Instant and exact — beats scanning backwards for a prologue, which is
+    unreliable on optimised code with shrink-wrapped or split prologues.
+
+    Example: you found a string xref at 0xd6ba5db and want the whole function:
+      fp binary func-bounds chrome.dll --rva 0xd6ba5db
+      fp binary disasm-rva chrome.dll --rva <begin_rva> -n 400
+    """
+    import json as json_mod
+    from fridapilot.tools.pe_rva import function_bounds
+
+    res = function_bounds(binary, int(rva, 0))
+    if json_output:
+        console.print(json_mod.dumps(res, indent=2, default=str))
+        return
+    if res is None:
+        console.print(f"[yellow]No .pdata entry covering RVA 0x{int(rva,0):x}[/yellow] "
+                      "(leaf function, or outside .pdata coverage)")
+        return
+    console.print(f"[bold]Function containing RVA 0x{int(rva,0):x}[/bold]")
+    console.print(f"  begin       RVA 0x{res['begin_rva']:08x}")
+    console.print(f"  end         RVA 0x{res['end_rva']:08x}")
+    console.print(f"  size        0x{res['size']:x} ({res['size']} bytes)")
+    console.print(f"  unwind info RVA 0x{res['unwind_info_rva']:08x}")
+
 def xrefs_rva_cmd(
     binary: str = typer.Argument(..., help="Path to PE file."),
     target: str = typer.Option(..., "--target", "-t", help="Target RVA to find references to."),
