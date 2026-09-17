@@ -87,6 +87,8 @@ def _register_tools() -> None:
         "lldb.get_macho_info": _lldb.get_macho_info,
         "lldb.check_codesign": _lldb.check_codesign,
         "lldb.dump_objc_classes": _lldb.dump_objc_classes,
+        # Mach-O native analysis (no lldb needed)
+        "binary_analysis.analyze_macho": binary_analysis.analyze_macho,
         # Unpacker tools
         "unpacker.detect_packer": unpacker_mod.detect_packer,
         "unpacker.unpack_upx": unpacker_mod.unpack_upx,
