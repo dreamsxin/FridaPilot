@@ -58,6 +58,90 @@ reverse engineering and dynamic/static analysis, decompose it into concrete step
 10. **Exit codes are clues**: Non-standard exit codes (10000, 10001, 10009) indicate validation checks. \
     Search for the exit code value in the binary to find the validation function.
 
+## RE Agent Workflow Stages (Triage → Static → Dynamic → Synthesis)
+
+Follow this stage-gate workflow. Do NOT skip stages.
+
+### Stage 1: Triage (mandatory first step, ~5 min)
+- Compute file hash (SHA256) for unique identification
+- Identify file type: PE/ELF/Mach-O/.NET/script/APK
+- Check for packing: entropy analysis, known packer signatures (UPX/VMProtect/Themida)
+- Extract strings for quick wins (flags, URLs, IPs, error messages)
+- Import table analysis: MUST categorize imports by capability (crypto, network, file, process)
+  - If imports are "too clean" (only kernel32/ntdll), suspect LoadLibrary + GetProcAddress dynamic loading
+  - If packed: note IAT is unreliable, plan for dynamic API capture
+- Detect language/compiler: VC++/Delphi/.NET/Go/Rust (determines tool choice)
+- Output: initial hypothesis list + capability assessment
+
+### Stage 2: Static Analysis (anchor points → deep dive)
+- Locate key functions: crypto/validation/network/authorization via string xrefs
+- High-risk API combinations (prioritize over individual APIs):
+  - Injection: FindWindow + WriteProcessMemory + CreateRemoteThread
+  - Crypto+file: CryptEncrypt + FindFirstFile + DeleteFile (ransomware pattern)
+  - Network+persist: InternetOpen/WinHttp + RegSetValue/CreateService
+- Time-box: ~15 min without key path → force transition to Dynamic
+- One tool stuck → switch tools (IDA ↔ r2 ↔ Ghidra ↔ FridaPilot binary analysis)
+
+### Stage 3: Dynamic Analysis (cross-validation loop)
+- Breakpoint priority order ("four-stage rocket"):
+  1. TLS callbacks (execute before entry point)
+  2. Entry point
+  3. Sensitive APIs (CreateRemoteThread, network, file write)
+  4. ExitProcess (fallback — dump memory on unexpected exit)
+- Anti-debug encountered → use bypass tools, don't assume "benign"
+- No behavior / immediate exit → check anti-VM/anti-debug, not "harmless"
+- Time-box: ~200 instructions single-step without progress → back to Static for new anchors
+- Crash-driven iteration: use crash logs to guide next hook round
+
+### Stage 4: Synthesis (IOC / report)
+- Document findings with evidence chain (Evidence → Finding → Path)
+- Extract IOCs: network indicators + host indicators
+- Generate report via docs-generator pattern
+
+## iOS / macOS RE Workflow (from reverse-skill-private)
+
+When target is an iOS/macOS app, follow this specialized pipeline:
+
+### Step 1: Acquire & Decrypt (frida-ios-dump)
+- Check FairPlay DRM: `otool -l binary | grep -A4 LC_ENCRYPTION_INFO` (cryptid=1 means encrypted)
+- Decrypt with frida-ios-dump on jailbroken device: `frida-ios-dump -H <ip> -p 22 "App Name"`
+- Alternative: use Clutch2 or bfdecrypt for on-device decryption
+- Analyze Mach-O: fat binary? `lipo -info binary`, extract specific arch with `lipo -thin arm64`
+
+### Step 2: Static Analysis (IDA / class-dump)
+- Extract ObjC headers: `class-dump decrypted_binary > headers.h`
+- Load into IDA: Mach-O loader, check for ASLR slide, __objc_methnames section
+- Key sections to examine: __objc_classlist, __objc_protolist, __swift5_types
+- String search priority: URLs, API endpoints, encryption keywords, jailbreak detection paths
+- For Swift: demangle names with `swift demangle`, check __swift5_* sections
+- Code signing: `codesign -dvvv binary` for entitlements (keychain groups, app groups)
+
+### Step 3: Dynamic Analysis — Frida Hooking
+- USB mode: `frida -U -f com.app.bundle -l hook.js --no-pause`
+- Key targets to hook:
+  - ObjC method dispatch: `Interceptor.attach(ObjC.classes.NSURLSession['- dataTaskWithRequest:completionHandler:'].implementation, ...)`
+  - Jailbreak detection: hook `access()`, `stat()`, `NSFileManager fileExistsAtPath:`
+  - SSL pinning: hook `SecTrustEvaluate`, `AFSecurityPolicy`, `TrustKit`
+  - Keychain: hook `SecItemCopyMatching`, `SecItemAdd`
+  - Crypto: hook `CCCrypt`, `SecKeyEncrypt`
+- Use spawn (not attach) for early interception of +load / __attribute__((constructor))
+- For ObjC: `ObjC.classes`, `ObjC.protocols`, `$ownMethods` enumeration
+- For Swift: bridge through ObjC runtime, or use `Module.findExportByName` for mangled names
+
+### Step 4: Dynamic Analysis — LLDB Debugging
+- Attach: `lldb -n "AppName"` or `process attach --name AppName`
+- Remote debug over USB: `debugserver *:1234 --attach=<pid>` on device, `process connect connect://<ip>:1234`
+- Key LLDB commands for iOS RE:
+  - `image list` — loaded dylibs and ASLR slide
+  - `image lookup -rn "ClassName"` — find methods by regex
+  - `br set -n "-[ClassName method:]"` — ObjC method breakpoint
+  - `register read` — check arguments (x0=self, x1=_cmd, x2+=args on ARM64)
+  - `memory read` / `x` — examine memory
+  - `po $x0` — print ObjC object (ARM64: x0 is first arg)
+  - `expression` — evaluate code in process context
+- Anti-debug: watch for `ptrace(PT_DENY_ATTACH)`, `sysctl(CTL_KERN, KERN_PROC)` checks
+- LLDB + Frida complementary: use Frida for broad monitoring, LLDB for precise single-step
+
 ## Available Tools
 
 ### Dynamic Analysis (requires running process)
