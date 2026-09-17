@@ -296,6 +296,22 @@ def field_refs(
 
     out: list[dict[str, Any]] = []
     n = len(data)
+    # An x86-64 memory operand encodes the displacement in one of three widths and
+    # the assembler always picks the shortest that fits:
+    #   mod=00  no disp        (offset 0, except rm=101 which means rip-relative)
+    #   mod=01  disp8          (-128..127)  <-- every struct offset <= 0x7F lands here
+    #   mod=10  disp32
+    # Matching only mod=10 silently misses ALL small offsets. That is a clean-looking
+    # zero-hit result, which is the most dangerous kind: nothing errors, the answer is
+    # just wrong. Observed on chrome.dll: `mov rcx,[rdi+0x78]` = 48 8B 4F 78 (mod=01).
+    if offset == 0:
+        want_mods = (0x00, 0x40, 0x80)
+    elif -128 <= offset <= 127:
+        want_mods = (0x40, 0x80)
+    else:
+        want_mods = (0x80,)
+    disp8_byte = struct.pack("<b", offset) if -128 <= offset <= 127 else None
+
     for i in range(n - 11):
         if not (0x48 <= data[i] <= 0x4F):
             continue
@@ -305,17 +321,28 @@ def field_refs(
         if not (is_w or is_r):
             continue
         modrm = data[i + 2]
-        if (modrm & 0xC0) != 0x80:        # need mod=10 (disp32 follows)
+        mod = modrm & 0xC0
+        if mod not in want_mods:
             continue
-        # rm=100 means a SIB byte sits between ModRM and disp32
-        disp_at = i + 4 if (modrm & 0x07) == 0x04 else i + 3
-        if data[disp_at:disp_at + 4] != disp_bytes:
-            continue
+        rm = modrm & 0x07
+        if mod == 0x00 and rm == 0x05:
+            continue                       # rip-relative, not a struct field
+        # rm=100 means a SIB byte sits between ModRM and the displacement
+        disp_at = i + 4 if rm == 0x04 else i + 3
+        if mod == 0x80:
+            if data[disp_at:disp_at + 4] != disp_bytes:
+                continue
+        elif mod == 0x40:
+            if disp8_byte is None or data[disp_at:disp_at + 1] != disp8_byte:
+                continue
+        # mod=00 with offset 0 needs no displacement check
         rva = scan_start_rva + i
 
         if verify:
             insn = next(iter(md.disasm(data[i:i + 16], base + rva)), None)
-            if insn is None or ("0x%x" % offset) not in insn.op_str:
+            if insn is None:
+                continue
+            if offset != 0 and ("0x%x" % abs(offset)) not in insn.op_str:
                 continue
             out.append({"from_rva": rva, "mnemonic": insn.mnemonic,
                         "op_str": insn.op_str, "size": insn.size,
@@ -326,6 +353,7 @@ def field_refs(
                         "op_str": "[reg+0x%x]" % offset, "size": 0,
                         "kind": "write" if is_w else "read"})
     return out
+
 
 
 def map_refs_to_functions(
