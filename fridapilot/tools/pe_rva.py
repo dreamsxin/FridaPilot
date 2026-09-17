@@ -230,7 +230,178 @@ def function_bounds(
     return None
 
 
+def map_refs_to_functions(
+    binary_path: str | Path,
+    targets: dict[str, int],
+    scan_start_rva: int,
+    scan_end_rva: int,
+    kinds: tuple[str, ...] = ("rip",),
+) -> dict[str, Any]:
+    """Map many target RVAs to the functions that reference them, in ONE pass.
+
+    Answers "which functions consume these N strings, and which does each use?" —
+    the practical shape of mapping a patched binary. Running ``xrefs_to_rva`` N times
+    would rescan the whole section N times; this scans once and groups by the
+    ``.pdata`` function that contains each reference.
+
+    Args:
+        targets: {label: rva}. Labels are free-form (usually the string itself).
+        kinds: same vocabulary as ``xrefs_to_rva``; "rip" is the useful one here.
+
+    Returns:
+        {
+          "functions": [{begin_rva, end_rva, size, labels: [...], refs: [{label, from_rva}]}],
+          "orphans":   [{label, from_rva}],   # reference outside any .pdata entry
+          "unreferenced": [label, ...],
+          "scanned_bytes": int,
+        }
+    """
+    import struct
+
+    import capstone
+    from capstone import x86 as cx86
+
+    img = PEImage(binary_path)
+    md = capstone.Cs(capstone.CS_ARCH_X86,
+                     capstone.CS_MODE_64 if img.is_64bit else capstone.CS_MODE_32)
+    md.detail = True
+    data = img.read_rva(scan_start_rva, scan_end_rva - scan_start_rva)
+    if data is None:
+        return {"functions": [], "orphans": [], "unreferenced": list(targets),
+                "scanned_bytes": 0}
+
+    base = img.image_base
+    by_rva: dict[int, list[str]] = {}
+    for label, rva in targets.items():
+        by_rva.setdefault(rva, []).append(label)
+    va_set = {base + r: r for r in by_rva}
+
+    RIP_OPCODES = frozenset((
+        0x8D, 0x8B, 0x89, 0x63, 0x85, 0xFF, 0xC7, 0x83, 0x81,
+        0x03, 0x2B, 0x3B, 0x33, 0x0B, 0x23,
+        0x01, 0x29, 0x39, 0x31, 0x09, 0x21,
+    ))
+
+    hits: list[tuple[int, int, int]] = []  # (from_rva, target_rva, insn_size)
+    n = len(data)
+    want_rip = "rip" in kinds
+    want_ptr = "ptr" in kinds
+    want_imm = "imm64" in kinds
+
+    for i in range(n - 9):
+        b0 = data[i]
+        if want_rip:
+            for pfx in (1, 0):
+                if pfx and not (0x40 <= b0 <= 0x4F):
+                    continue
+                op_i = i + pfx
+                if op_i + 6 >= n:
+                    continue
+                opc = data[op_i]
+                if opc == 0x0F:
+                    if (data[op_i + 2] & 0xC7) != 0x05:
+                        continue
+                    disp_at, ilen = op_i + 3, (op_i + 7) - i
+                elif opc in RIP_OPCODES:
+                    if (data[op_i + 1] & 0xC7) != 0x05:
+                        continue
+                    disp_at, ilen = op_i + 2, (op_i + 6) - i
+                else:
+                    continue
+                disp = struct.unpack_from("<i", data, disp_at)[0]
+                cand = scan_start_rva + i
+                for extra in (0, 1, 2, 4):
+                    tgt = cand + ilen + extra + disp
+                    if tgt not in by_rva:
+                        continue
+                    off = cand - scan_start_rva
+                    insn = next(iter(md.disasm(data[off:off + 16], base + cand)), None)
+                    if insn is None:
+                        continue
+                    real = None
+                    for op in insn.operands:
+                        if op.type == cx86.X86_OP_MEM and op.mem.base == cx86.X86_REG_RIP:
+                            real = insn.address + insn.size + op.mem.disp - base
+                            break
+                    if real in by_rva:
+                        hits.append((cand, real, insn.size))
+                    break
+                else:
+                    continue
+                break
+        if want_imm and b0 in (0x48, 0x49) and 0xB8 <= data[i + 1] <= 0xBF:
+            va = struct.unpack_from("<Q", data, i + 2)[0]
+            if va in va_set:
+                hits.append((scan_start_rva + i, va_set[va], 10))
+        if want_ptr:
+            va = struct.unpack_from("<Q", data, i)[0]
+            if va in va_set:
+                hits.append((scan_start_rva + i, va_set[va], 8))
+
+    # drop refs that fall inside an earlier instruction (REX-less double reading)
+    hits.sort()
+    pruned: list[tuple[int, int]] = []
+    covered = -1
+    for from_rva, tgt, size in hits:
+        if from_rva < covered:
+            continue
+        pruned.append((from_rva, tgt))
+        covered = from_rva + size
+
+    # group by .pdata function. Load the RUNTIME_FUNCTION table once — calling
+    # function_bounds() per hit would re-read the whole PE each time.
+    pdata_blob = b""
+    for va, vs, praw, rsize, name in img._sections:
+        if name == ".pdata":
+            pdata_blob = img._data[praw:praw + min(vs, rsize)]
+            break
+    pcount = len(pdata_blob) // 12
+
+    def _lookup(rva: int):
+        lo, hi = 0, pcount - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            begin, end, _unwind = struct.unpack_from("<III", pdata_blob, mid * 12)
+            if rva < begin:
+                hi = mid - 1
+            elif rva >= end:
+                lo = mid + 1
+            else:
+                return begin, end
+        return None
+
+    funcs: dict[int, dict[str, Any]] = {}
+    orphans: list[dict[str, Any]] = []
+    referenced: set[int] = set()
+    for from_rva, tgt in pruned:
+        referenced.add(tgt)
+        label = by_rva[tgt][0]
+        fb = _lookup(from_rva)
+        if fb is None:
+            orphans.append({"label": label, "from_rva": from_rva})
+            continue
+        begin, end = fb
+        entry = funcs.setdefault(begin, {
+            "begin_rva": begin, "end_rva": end, "size": end - begin,
+            "labels": [], "refs": [],
+        })
+        entry["refs"].append({"label": label, "from_rva": from_rva})
+        if label not in entry["labels"]:
+            entry["labels"].append(label)
+
+
+    out_funcs = sorted(funcs.values(), key=lambda f: -len(f["labels"]))
+    return {
+        "functions": out_funcs,
+        "orphans": orphans,
+        "unreferenced": sorted(l for r, ls in by_rva.items() if r not in referenced
+                               for l in ls),
+        "scanned_bytes": n,
+    }
+
+
 def xrefs_to_rva(
+
 
     binary_path: str | Path,
     target_rva: int,

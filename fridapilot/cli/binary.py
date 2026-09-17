@@ -476,7 +476,123 @@ def find_string_rva_cmd(
             console.print(f"  RVA 0x{r['rva']:08x}  off 0x{r['offset']:08x}  {r['needle'][:80]}")
 
 
+@binary_app.command("map-refs")
+def map_refs_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file (x64)."),
+    strings: str = typer.Option(
+        "", "--strings", "-s",
+        help="Comma-separated exact strings to locate and map."),
+    prefix: str = typer.Option(
+        "", "--prefix", "-p",
+        help="Auto-collect every NUL-terminated .rdata string starting with this "
+             "prefix (e.g. 'np-'). Combines with --strings."),
+    start: str = typer.Option("", "--start", help="Scan start RVA (default: .text)."),
+    end: str = typer.Option("", "--end", help="Scan end RVA (default: end of .text)."),
+    kinds: str = typer.Option("rip", "--kinds", "-k", help="rip,ptr,imm64."),
+    min_labels: int = typer.Option(1, "--min-labels", help="Only show functions with >= N distinct strings."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Map many strings to the functions that reference them, in one pass.
+
+    Answers "which functions consume these N strings, and which does each use?" —
+    the practical shape of mapping a patched binary. Running xrefs-rva N times would
+    rescan the section N times; this scans once and groups by .pdata function.
+
+    Example: map every custom switch of a patched Chromium to its consuming function:
+      fp binary map-refs chrome.dll --prefix np- --min-labels 2
+    """
+    import json as json_mod
+    import re
+
+    from fridapilot.tools.pe_rva import PEImage, map_refs_to_functions
+
+    img = PEImage(binary)
+    targets: dict[str, int] = {}
+
+    def _add(sv: str) -> None:
+        pat = sv.encode("utf-8")
+        pos = 0
+        while True:
+            i = img._data.find(pat, pos)
+            if i < 0:
+                break
+            pos = i + 1
+            rva = img.off_to_rva(i)
+            if rva is not None and img.section_of(rva) in (".rdata", ".rodata", ".data"):
+                targets.setdefault(sv, rva)
+                break
+
+    for sv in (s.strip() for s in strings.split(",")):
+        if sv:
+            _add(sv)
+
+    if prefix:
+        rd = None
+        for va, vs, praw, rsize, name in img._sections:
+            if name == ".rdata":
+                rd = (va, praw, min(vs, rsize))
+                break
+        if rd:
+            rva0, praw, size = rd
+            blob = img._data[praw:praw + size]
+            pat = re.compile(re.escape(prefix.encode("ascii")) + rb"[\x20-\x7e]{1,60}")
+
+            for m in pat.finditer(blob):
+                s = m.group(0)
+                # only accept a NUL-terminated standalone string
+                endi = m.end()
+                if endi < len(blob) and blob[endi] != 0:
+                    continue
+                if m.start() > 0 and blob[m.start() - 1] not in (0,):
+                    continue
+                try:
+                    label = s.decode("ascii")
+                except UnicodeDecodeError:
+                    continue
+                targets.setdefault(label, rva0 + m.start())
+
+    if not targets:
+        console.print("[red]No target strings resolved.[/red]")
+        return
+
+    text = None
+    for va, vs, _praw, rsize, name in img._sections:
+        if name == ".text":
+            text = (va, va + max(vs, rsize))
+            break
+    s_rva = int(start, 0) if start else (text[0] if text else 0x1000)
+    e_rva = int(end, 0) if end else (text[1] if text else 0x1000)
+
+    console.print(f"[bold]{len(targets)} target strings[/bold], scanning "
+                  f"[0x{s_rva:x},0x{e_rva:x})…")
+    kind_tuple = tuple(k.strip() for k in kinds.split(",") if k.strip())
+    res = map_refs_to_functions(binary, targets, s_rva, e_rva, kinds=kind_tuple)
+
+    if json_output:
+        console.print(json_mod.dumps(res, indent=2, default=str))
+        return
+
+    shown = [f for f in res["functions"] if len(f["labels"]) >= min_labels]
+    console.print(f"\n[bold]{len(shown)} function(s)[/bold] "
+                  f"(of {len(res['functions'])}) with >= {min_labels} distinct string(s):\n")
+    for f in shown:
+        console.print(f"[cyan]RVA 0x{f['begin_rva']:08x}–0x{f['end_rva']:08x}[/cyan] "
+                      f"({f['size']} bytes)  {len(f['labels'])} strings, "
+                      f"{len(f['refs'])} refs")
+        for lb in f["labels"]:
+            console.print(f"    {lb}")
+        console.print("")
+    if res["orphans"]:
+        console.print(f"[yellow]{len(res['orphans'])} ref(s) outside any .pdata entry "
+                      "(leaf functions)[/yellow]")
+    if res["unreferenced"]:
+        console.print(f"[dim]{len(res['unreferenced'])} string(s) with no reference in "
+                      f"range: {', '.join(res['unreferenced'][:12])}"
+                      f"{'…' if len(res['unreferenced']) > 12 else ''}[/dim]")
+
+
 @binary_app.command("func-bounds")
+
 def func_bounds_cmd(
     binary: str = typer.Argument(..., help="Path to PE file (x64)."),
     rva: str = typer.Option(..., "--rva", "-r", help="Any RVA inside the function."),
