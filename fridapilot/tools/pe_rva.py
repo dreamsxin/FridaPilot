@@ -73,9 +73,16 @@ class PEImage:
         return self.image_base + rva
 
     def read_rva(self, rva: int, n: int) -> bytes | None:
+        """Read n bytes at an RVA, clamped to the containing section boundary."""
         off = self.rva_to_off(rva)
         if off is None:
             return None
+        # Clamp to section boundary to avoid cross-section reads
+        for va, _vs, praw, rsize, _ in self._sections:
+            if praw <= off < praw + rsize:
+                available = (praw + rsize) - off
+                actual = min(n, available)
+                return self._data[off:off + actual]
         return self._data[off:off + n]
 
     def in_file(self, rva: int) -> bool:

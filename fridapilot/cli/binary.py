@@ -421,7 +421,9 @@ def analyze_cmd(
     console.print(f"\n[bold green]Analysis complete.[/bold green] Ran: {', '.join(combined['analyses'])}")
 
     if json_output:
+        # Skip rich output above when --json is used; emit clean JSON only
         _emit_json(combined)
+        return
 
 
 # ── RVA-aware commands (ImageBase-correct; see tools/pe_rva.py) ──

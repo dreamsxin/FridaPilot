@@ -69,11 +69,18 @@ class LLDBBridge:
         """Run an lldb command and return output."""
         if not self._lldb_path:
             raise RuntimeError("LLDB not found in PATH")
-        cmd = [self._lldb_path, "--batch", "--one-line-on-crash", "bt", *args]
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-        )
-        return result.stdout + result.stderr
+        cmd = [self._lldb_path, "--no-lldbinit", "--batch", "--one-line-on-crash", "bt", *args]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+            )
+            if result.returncode != 0:
+                return result.stdout + result.stderr + f"\n[exit code: {result.returncode}]"
+            return result.stdout + result.stderr
+        except subprocess.TimeoutExpired:
+            return f"[LLDB timeout after {timeout}s]"
+        except Exception as e:
+            return f"[LLDB error: {e}]"
 
     def analyze_binary(self, binary_path: str) -> dict[str, Any]:
         """Analyze a Mach-O binary with LLDB: sections, symbols, load commands.
@@ -84,8 +91,13 @@ class LLDBBridge:
         Returns:
             Dict with binary info, sections, symbols, entitlements.
         """
+        p = Path(binary_path)
+        if not p.exists():
+            return {"binary": binary_path, "error": f"File not found: {binary_path}"}
+        # Use the path as an argv element to avoid shell injection via filenames
+        safe_path = str(p.resolve())
         output = self._run_cmd(
-            "-o", f"target create \"{binary_path}\"",
+            "-o", f"target create {safe_path}",
             "-o", "image list",
             "-o", "image dump sections",
             "-o", "target modules dump symtab",
