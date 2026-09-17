@@ -230,7 +230,106 @@ def function_bounds(
     return None
 
 
+def field_refs(
+    binary_path: str | Path,
+    offset: int,
+    scan_start_rva: int | None = None,
+    scan_end_rva: int | None = None,
+    kind: str = "both",
+    verify: bool = True,
+) -> list[dict[str, Any]]:
+    """Find reads/writes of a struct field at ``[reg + offset]``.
+
+    The practical question when reverse-engineering a C++ object: "who writes
+    ``this->field_`` at +0xB0?". Answering it by hand is where RVA/file-offset
+    conversion bugs bite — each section has its own ``VirtualAddress`` vs
+    ``PointerToRawData`` delta, so a single constant is wrong the moment you cross
+    a section boundary. This routine goes through the section table.
+
+    Matches x86-64 ``mod=10`` (disp32) memory operands:
+      write  ``REX.W 89 /r disp32``   mov [reg+off], r64
+             ``REX.W C7 /r disp32``   mov [reg+off], imm32
+             ``REX.W 01/29/31/09/21`` add/sub/xor/or/and [reg+off], r64
+      read   ``REX.W 8B /r disp32``   mov r64, [reg+off]
+             ``REX.W 03/2B/33/0B/23`` add/sub/xor/or/and r64, [reg+off]
+             ``REX.W 3B/85``          cmp/test
+
+    Args:
+        offset: the disp32 value (struct field offset).
+        scan_start_rva/scan_end_rva: default to the whole ``.text``.
+        kind: "read", "write" or "both".
+        verify: decode each candidate with capstone (filters partial-instruction
+            false positives, which is exactly how the hand-rolled version failed).
+
+    Returns list of {from_rva, mnemonic, op_str, kind, size}.
+    """
+    import struct
+
+    import capstone
+
+    WRITE_OPS = {0x89: "mov", 0xC7: "mov", 0x01: "add", 0x29: "sub",
+                 0x31: "xor", 0x09: "or", 0x21: "and"}
+    READ_OPS = {0x8B: "mov", 0x03: "add", 0x2B: "sub", 0x33: "xor",
+                0x0B: "or", 0x23: "and", 0x3B: "cmp", 0x85: "test"}
+
+    img = PEImage(binary_path)
+    if scan_start_rva is None or scan_end_rva is None:
+        for va, vs, _praw, rsize, name in img._sections:
+            if name == ".text":
+                scan_start_rva = scan_start_rva if scan_start_rva is not None else va
+                scan_end_rva = scan_end_rva if scan_end_rva is not None else va + max(vs, rsize)
+                break
+    if scan_start_rva is None or scan_end_rva is None:
+        return []
+
+    data = img.read_rva(scan_start_rva, scan_end_rva - scan_start_rva)
+    if data is None:
+        return []
+
+    md = capstone.Cs(capstone.CS_ARCH_X86,
+                     capstone.CS_MODE_64 if img.is_64bit else capstone.CS_MODE_32)
+    md.detail = True
+    base = img.image_base
+    want_w = kind in ("write", "both")
+    want_r = kind in ("read", "both")
+    disp_bytes = struct.pack("<i", offset)
+
+    out: list[dict[str, Any]] = []
+    n = len(data)
+    for i in range(n - 11):
+        if not (0x48 <= data[i] <= 0x4F):
+            continue
+        opc = data[i + 1]
+        is_w = want_w and opc in WRITE_OPS
+        is_r = want_r and opc in READ_OPS
+        if not (is_w or is_r):
+            continue
+        modrm = data[i + 2]
+        if (modrm & 0xC0) != 0x80:        # need mod=10 (disp32 follows)
+            continue
+        # rm=100 means a SIB byte sits between ModRM and disp32
+        disp_at = i + 4 if (modrm & 0x07) == 0x04 else i + 3
+        if data[disp_at:disp_at + 4] != disp_bytes:
+            continue
+        rva = scan_start_rva + i
+
+        if verify:
+            insn = next(iter(md.disasm(data[i:i + 16], base + rva)), None)
+            if insn is None or ("0x%x" % offset) not in insn.op_str:
+                continue
+            out.append({"from_rva": rva, "mnemonic": insn.mnemonic,
+                        "op_str": insn.op_str, "size": insn.size,
+                        "kind": "write" if is_w else "read"})
+        else:
+            out.append({"from_rva": rva,
+                        "mnemonic": (WRITE_OPS if is_w else READ_OPS)[opc],
+                        "op_str": "[reg+0x%x]" % offset, "size": 0,
+                        "kind": "write" if is_w else "read"})
+    return out
+
+
 def map_refs_to_functions(
+
     binary_path: str | Path,
     targets: dict[str, int],
     scan_start_rva: int,

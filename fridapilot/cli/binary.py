@@ -476,7 +476,63 @@ def find_string_rva_cmd(
             console.print(f"  RVA 0x{r['rva']:08x}  off 0x{r['offset']:08x}  {r['needle'][:80]}")
 
 
+@binary_app.command("field-refs")
+def field_refs_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file (x64)."),
+    offset: str = typer.Option(..., "--offset", "-o", help="Struct field offset, e.g. 0xB0."),
+    start: str = typer.Option("", "--start-rva", help="Scan start RVA (default: .text)."),
+    end: str = typer.Option("", "--end-rva", help="Scan end RVA (default: end of .text)."),
+    kind: str = typer.Option("both", "--kind", "-k", help="read | write | both."),
+    no_verify: bool = typer.Option(False, "--no-verify", help="Skip capstone verification."),
+    with_func: bool = typer.Option(False, "--with-func", help="Also resolve containing function."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Find reads/writes of a struct field at [reg + offset].
+
+    Answers "who writes this->field_ at +0xB0?" — the practical question when
+    reverse-engineering a C++ object. Uses the section table for RVA conversion; a
+    hand-rolled scan with a single RVA->offset constant silently produces garbage
+    the moment it crosses a section boundary.
+
+    Always sanity-check with a known reference first:
+      fp binary field-refs chrome.dll -o 0xB0 --kind read --start-rva 0xb029000 \\
+          --end-rva 0xb02a000        # must include the known read site
+    """
+    import json as json_mod
+
+    from fridapilot.tools.pe_rva import field_refs, function_bounds
+
+    res = field_refs(binary, int(offset, 0),
+                     int(start, 0) if start else None,
+                     int(end, 0) if end else None,
+                     kind=kind, verify=not no_verify)
+    if with_func:
+        for r in res:
+            fb = function_bounds(binary, r["from_rva"])
+            r["func_begin_rva"] = fb["begin_rva"] if fb else None
+            r["func_size"] = fb["size"] if fb else None
+
+    if json_output:
+        console.print(json_mod.dumps(res, indent=2, default=str))
+        return
+
+    writes = [r for r in res if r["kind"] == "write"]
+    reads = [r for r in res if r["kind"] == "read"]
+    console.print(f"[bold]Refs to reg+{offset}[/bold] — "
+                  f"{len(writes)} write(s), {len(reads)} read(s)")
+    for label, group in (("WRITE", writes), ("READ", reads)):
+        if not group:
+            continue
+        console.print(f"\n[cyan]{label}[/cyan]")
+        for r in group:
+            fn = ""
+            if with_func and r.get("func_begin_rva"):
+                fn = f"   [dim]fn 0x{r['func_begin_rva']:08x} ({r['func_size']}B)[/dim]"
+            console.print(f"  RVA 0x{r['from_rva']:08x}  {r['mnemonic']} {r['op_str']}{fn}")
+
+
 @binary_app.command("map-refs")
+
 def map_refs_cmd(
     binary: str = typer.Argument(..., help="Path to PE file (x64)."),
     strings: str = typer.Option(
