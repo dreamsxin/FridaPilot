@@ -1,5 +1,8 @@
 """fp binary - Static binary analysis commands."""
 
+import json as _json
+import sys
+
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -7,7 +10,21 @@ from rich.table import Table
 from rich.panel import Panel
 
 console = Console()
+err_console = Console(stderr=True)
 binary_app = typer.Typer(no_args_is_help=True)
+
+
+def _emit_json(obj) -> None:
+    """Write JSON to stdout verbatim.
+
+    Never route machine-readable output through ``rich.Console``: it soft-wraps at
+    the terminal width (80 columns when stdout is a pipe) and parses ``[...]`` as
+    markup. Both corrupt the payload silently — no error, no missing line, just
+    wrong bytes. Progress/status text belongs on stderr (``err_console``) so that
+    ``--json`` output stays parseable when redirected to a file.
+    """
+    sys.stdout.write(_json.dumps(obj, indent=2, default=str) + "\n")
+
 
 
 @binary_app.command("analyze-pe")
@@ -22,7 +39,7 @@ def analyze_pe_cmd(
     result = analyze_pe(binary)
 
     if json_output:
-        console.print(json_mod.dumps(result.model_dump(), indent=2, default=str))
+        _emit_json(result.model_dump())
         return
 
     console.print(Panel(f"[bold]{result.filepath}[/bold]", title="PE Analysis"))
@@ -85,7 +102,7 @@ def analyze_elf_cmd(
     result = analyze_elf(binary)
 
     if json_output:
-        console.print(json_mod.dumps(result.model_dump(), indent=2, default=str))
+        _emit_json(result.model_dump())
         return
 
     console.print(Panel(f"[bold]{result.filepath}[/bold]", title="ELF Analysis"))
@@ -137,7 +154,7 @@ def disassemble_cmd(
     result = disassemble(binary, addr, count=count, arch=arch)
 
     if json_output:
-        console.print(json_mod.dumps(result.model_dump(), indent=2, default=str))
+        _emit_json(result.model_dump())
         return
 
     console.print(f"[bold]Disassembly[/bold] @ 0x{addr:x} ({result.architecture})")
@@ -166,7 +183,7 @@ def find_strings_cmd(
     results = results[:limit]
 
     if json_output:
-        console.print(json_mod.dumps([s.model_dump() for s in results], indent=2, default=str))
+        _emit_json([s.model_dump() for s in results])
         return
 
     console.print(f"[bold]Strings[/bold] ({len(results)} found)")
@@ -189,7 +206,7 @@ def search_bytes_cmd(
     results = search_bytes(binary, pattern, limit=limit)
 
     if json_output:
-        console.print(json_mod.dumps([m.model_dump() for m in results], indent=2, default=str))
+        _emit_json([m.model_dump() for m in results])
         return
 
     console.print(f"[bold]Byte Pattern Search[/bold] ({len(results)} matches)")
@@ -217,7 +234,7 @@ def xrefs_cmd(
     results = xrefs_to(binary, addr, search_range=search_range)
 
     if json_output:
-        console.print(json_mod.dumps([x.model_dump() for x in results], indent=2, default=str))
+        _emit_json([x.model_dump() for x in results])
         return
 
     console.print(f"[bold]Cross-References to 0x{addr:x}[/bold] ({len(results)} found)")
@@ -237,7 +254,7 @@ def analyze_go_cmd(
     result = analyze_go_binary(binary)
 
     if json_output:
-        console.print(json_mod.dumps(result.model_dump(), indent=2, default=str))
+        _emit_json(result.model_dump())
         return
 
     console.print(Panel(f"[bold]{result.filepath}[/bold]", title="Go Binary Analysis"))
@@ -404,7 +421,7 @@ def analyze_cmd(
     console.print(f"\n[bold green]Analysis complete.[/bold green] Ran: {', '.join(combined['analyses'])}")
 
     if json_output:
-        console.print(json_mod.dumps(combined, indent=2, default=str))
+        _emit_json(combined)
 
 
 # ── RVA-aware commands (ImageBase-correct; see tools/pe_rva.py) ──
@@ -437,7 +454,7 @@ def disasm_rva_cmd(
     result = disassemble_rva(binary, int(rva, 0), count=count, symbols=sym_map)
 
     if json_output:
-        console.print(json_mod.dumps(result, indent=2, default=str))
+        _emit_json(result)
         return
 
     if result.get("error"):
@@ -466,7 +483,7 @@ def find_string_rva_cmd(
     results = find_string_rvas(binary, needle_list, encoding=encoding)
 
     if json_output:
-        console.print(json_mod.dumps(results, indent=2, default=str))
+        _emit_json(results)
         return
 
     console.print(f"[bold]String RVA lookup[/bold] ({len(results)} hits)")
@@ -514,7 +531,7 @@ def field_refs_cmd(
             r["func_size"] = fb["size"] if fb else None
 
     if json_output:
-        console.print(json_mod.dumps(res, indent=2, default=str))
+        _emit_json(res)
         return
 
     writes = [r for r in res if r["kind"] == "write"]
@@ -620,13 +637,13 @@ def map_refs_cmd(
     s_rva = int(start, 0) if start else (text[0] if text else 0x1000)
     e_rva = int(end, 0) if end else (text[1] if text else 0x1000)
 
-    console.print(f"[bold]{len(targets)} target strings[/bold], scanning "
-                  f"[0x{s_rva:x},0x{e_rva:x})…")
+    err_console.print(f"[bold]{len(targets)} target strings[/bold], scanning "
+                      f"[0x{s_rva:x},0x{e_rva:x})…")
     kind_tuple = tuple(k.strip() for k in kinds.split(",") if k.strip())
     res = map_refs_to_functions(binary, targets, s_rva, e_rva, kinds=kind_tuple)
 
     if json_output:
-        console.print(json_mod.dumps(res, indent=2, default=str))
+        _emit_json(res)
         return
 
     shown = [f for f in res["functions"] if len(f["labels"]) >= min_labels]
@@ -669,7 +686,7 @@ def func_bounds_cmd(
 
     res = function_bounds(binary, int(rva, 0))
     if json_output:
-        console.print(json_mod.dumps(res, indent=2, default=str))
+        _emit_json(res)
         return
     if res is None:
         console.print(f"[yellow]No .pdata entry covering RVA 0x{int(rva,0):x}[/yellow] "
@@ -681,6 +698,7 @@ def func_bounds_cmd(
     console.print(f"  size        0x{res['size']:x} ({res['size']} bytes)")
     console.print(f"  unwind info RVA 0x{res['unwind_info_rva']:08x}")
 
+@binary_app.command("xrefs-rva")
 def xrefs_rva_cmd(
     binary: str = typer.Argument(..., help="Path to PE file."),
     target: str = typer.Option(..., "--target", "-t", help="Target RVA to find references to."),
@@ -719,7 +737,7 @@ def xrefs_rva_cmd(
                            kinds=kind_tuple, verify=not no_verify)
 
     if json_output:
-        console.print(json_mod.dumps(results, indent=2, default=str))
+        _emit_json(results)
         return
 
     console.print(f"[bold]RVA xrefs to 0x{int(target,0):x}[/bold] "
