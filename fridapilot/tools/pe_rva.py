@@ -303,14 +303,14 @@ def field_refs(
 
     out: list[dict[str, Any]] = []
     n = len(data)
-    # An x86-64 memory operand encodes the displacement in one of three widths and
-    # the assembler always picks the shortest that fits:
-    #   mod=00  no disp        (offset 0, except rm=101 which means rip-relative)
-    #   mod=01  disp8          (-128..127)  <-- every struct offset <= 0x7F lands here
+    # An x86-64 memory operand encodes the displacement in one of three widths and the
+    # assembler always picks the shortest that fits:
+    #   mod=00  no disp    (offset 0; rm=101 means rip-relative, not a struct field)
+    #   mod=01  disp8      (-128..127)  <-- every struct offset <= 0x7F lands here
     #   mod=10  disp32
-    # Matching only mod=10 silently misses ALL small offsets. That is a clean-looking
-    # zero-hit result, which is the most dangerous kind: nothing errors, the answer is
-    # just wrong. Observed on chrome.dll: `mov rcx,[rdi+0x78]` = 48 8B 4F 78 (mod=01).
+    # Matching only mod=10 silently misses ALL small offsets, and the failure looks like
+    # a clean zero-hit result — indistinguishable from "this field is never touched".
+    # Observed on chrome.dll: `mov rcx,[rdi+0x78]` = 48 8B 4F 78 (mod=01).
     if offset == 0:
         want_mods = (0x00, 0x40, 0x80)
     elif -128 <= offset <= 127:
@@ -319,15 +319,64 @@ def field_refs(
         want_mods = (0x80,)
     disp8_byte = struct.pack("<b", offset) if -128 <= offset <= 127 else None
 
+    # SSE moves are how MSVC initialises two adjacent 8-byte members in one go, and
+    # how it copies small structs. They carry NO REX.W (the operand size comes from
+    # the 0F escape opcode), so a scan that requires 0x48-0x4F never sees them.
+    #   0F 11 /r   movups m128, xmm      store
+    #   0F 29 /r   movaps m128, xmm      store
+    #   0F 10 /r   movups xmm, m128      load
+    #   0F 28 /r   movaps xmm, m128      load
+    # An optional REX (0x40-0x4F) may precede 0F when xmm8-15 / r8-r15 are involved.
+    SSE_W = {0x11: "movups", 0x29: "movaps"}
+    SSE_R = {0x10: "movups", 0x28: "movaps"}
+
+
+    def _classify(i: int):
+        """-> (modrm_index, mnemonic, is_write) or None."""
+        b0 = data[i]
+        # REX.W + general-purpose op
+        if 0x48 <= b0 <= 0x4F:
+            opc = data[i + 1]
+            if want_w and opc in WRITE_OPS:
+                return i + 2, WRITE_OPS[opc], True
+            if want_r and opc in READ_OPS:
+                return i + 2, READ_OPS[opc], False
+            # REX + 0F xx  (SSE with extended registers)
+            if opc == 0x0F:
+                s = data[i + 2]
+                if want_w and s in SSE_W:
+                    return i + 3, SSE_W[s], True
+                if want_r and s in SSE_R:
+                    return i + 3, SSE_R[s], False
+            return None
+        # bare REX (no W) + 0F xx
+        if 0x40 <= b0 <= 0x47 and data[i + 1] == 0x0F:
+            s = data[i + 2]
+            if want_w and s in SSE_W:
+                return i + 3, SSE_W[s], True
+            if want_r and s in SSE_R:
+                return i + 3, SSE_R[s], False
+            return None
+        # no prefix
+        if b0 == 0x0F:
+            s = data[i + 1]
+            if want_w and s in SSE_W:
+                return i + 2, SSE_W[s], True
+            if want_r and s in SSE_R:
+                return i + 2, SSE_R[s], False
+        return None
+
+    out: list[dict[str, Any]] = []
+    n = len(data)
+    covered_until = 0          # drop candidates that start inside an accepted instruction
     for i in range(n - 11):
-        if not (0x48 <= data[i] <= 0x4F):
+        if i < covered_until:
             continue
-        opc = data[i + 1]
-        is_w = want_w and opc in WRITE_OPS
-        is_r = want_r and opc in READ_OPS
-        if not (is_w or is_r):
+        hit = _classify(i)
+        if hit is None:
             continue
-        modrm = data[i + 2]
+        modrm_at, mnem, is_w = hit
+        modrm = data[modrm_at]
         mod = modrm & 0xC0
         if mod not in want_mods:
             continue
@@ -335,7 +384,7 @@ def field_refs(
         if mod == 0x00 and rm == 0x05:
             continue                       # rip-relative, not a struct field
         # rm=100 means a SIB byte sits between ModRM and the displacement
-        disp_at = i + 4 if rm == 0x04 else i + 3
+        disp_at = modrm_at + 2 if rm == 0x04 else modrm_at + 1
         if mod == 0x80:
             if data[disp_at:disp_at + 4] != disp_bytes:
                 continue
@@ -351,15 +400,16 @@ def field_refs(
                 continue
             if offset != 0 and ("0x%x" % abs(offset)) not in insn.op_str:
                 continue
+            covered_until = i + insn.size
             out.append({"from_rva": rva, "mnemonic": insn.mnemonic,
                         "op_str": insn.op_str, "size": insn.size,
                         "kind": "write" if is_w else "read"})
         else:
-            out.append({"from_rva": rva,
-                        "mnemonic": (WRITE_OPS if is_w else READ_OPS)[opc],
+            out.append({"from_rva": rva, "mnemonic": mnem,
                         "op_str": "[reg+0x%x]" % offset, "size": 0,
                         "kind": "write" if is_w else "read"})
     return out
+
 
 
 
