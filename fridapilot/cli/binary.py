@@ -2,6 +2,7 @@
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from rich.panel import Panel
 
@@ -141,7 +142,7 @@ def disassemble_cmd(
 
     console.print(f"[bold]Disassembly[/bold] @ 0x{addr:x} ({result.architecture})")
     for insn in result.instructions:
-        console.print(f"  0x{insn.address:08x}  {insn.bytes_hex:<20s}  {insn.mnemonic:<8s} {insn.op_str}")
+        console.print(f"  0x{insn.address:08x}  {insn.bytes_hex:<20s}  {insn.mnemonic:<8s} {escape(insn.op_str)}")
 
 
 @binary_app.command("find-strings")
@@ -445,9 +446,9 @@ def disasm_rva_cmd(
     console.print(f"[bold]Disassembly[/bold] @ RVA 0x{result['start_rva']:x} "
                   f"(ImageBase 0x{result['image_base']:x})")
     for ln in result["lines"]:
-        note = f"  [cyan]{ln['note']}[/cyan]" if ln["note"] else ""
+        note = f"  [cyan]{escape(ln['note'])}[/cyan]" if ln["note"] else ""
         console.print(f"  RVA 0x{ln['rva']:08x}  {ln['bytes_hex']:<20s}  "
-                      f"{ln['mnemonic']:<8s} {ln['op_str']}{note}")
+                      f"{ln['mnemonic']:<8s} {escape(ln['op_str'])}{note}")
 
 
 @binary_app.command("find-string-rva")
@@ -528,7 +529,7 @@ def field_refs_cmd(
             fn = ""
             if with_func and r.get("func_begin_rva"):
                 fn = f"   [dim]fn 0x{r['func_begin_rva']:08x} ({r['func_size']}B)[/dim]"
-            console.print(f"  RVA 0x{r['from_rva']:08x}  {r['mnemonic']} {r['op_str']}{fn}")
+            console.print(f"  RVA 0x{r['from_rva']:08x}  {r['mnemonic']} {escape(r['op_str'])}{fn}")
 
 
 @binary_app.command("map-refs")
@@ -725,7 +726,7 @@ def xrefs_rva_cmd(
                   f"in [0x{int(start,0):x},0x{int(end,0):x}) — {len(results)} found")
     for x in results:
         console.print(f"  RVA 0x{x['from_rva']:08x}  [{x['kind']:<5s}]  "
-                      f"{x['mnemonic']} {x['op_str']}")
+                      f"{x['mnemonic']} {escape(x['op_str'])}")
     if not results and "ptr" not in kind_tuple:
         console.print("[dim]  Tip: 0 hits for a string that is clearly used? It may be "
                       "in a const char* table — retry with --kinds ptr over .rdata.[/dim]")
