@@ -98,6 +98,50 @@ Follow this stage-gate workflow. Do NOT skip stages.
 - Extract IOCs: network indicators + host indicators
 - Generate report via docs-generator pattern
 
+## iOS / macOS RE Workflow (from reverse-skill-private)
+
+When target is an iOS/macOS app, follow this specialized pipeline:
+
+### Step 1: Acquire & Decrypt (frida-ios-dump)
+- Check FairPlay DRM: `otool -l binary | grep -A4 LC_ENCRYPTION_INFO` (cryptid=1 means encrypted)
+- Decrypt with frida-ios-dump on jailbroken device: `frida-ios-dump -H <ip> -p 22 "App Name"`
+- Alternative: use Clutch2 or bfdecrypt for on-device decryption
+- Analyze Mach-O: fat binary? `lipo -info binary`, extract specific arch with `lipo -thin arm64`
+
+### Step 2: Static Analysis (IDA / class-dump)
+- Extract ObjC headers: `class-dump decrypted_binary > headers.h`
+- Load into IDA: Mach-O loader, check for ASLR slide, __objc_methnames section
+- Key sections to examine: __objc_classlist, __objc_protolist, __swift5_types
+- String search priority: URLs, API endpoints, encryption keywords, jailbreak detection paths
+- For Swift: demangle names with `swift demangle`, check __swift5_* sections
+- Code signing: `codesign -dvvv binary` for entitlements (keychain groups, app groups)
+
+### Step 3: Dynamic Analysis — Frida Hooking
+- USB mode: `frida -U -f com.app.bundle -l hook.js --no-pause`
+- Key targets to hook:
+  - ObjC method dispatch: `Interceptor.attach(ObjC.classes.NSURLSession['- dataTaskWithRequest:completionHandler:'].implementation, ...)`
+  - Jailbreak detection: hook `access()`, `stat()`, `NSFileManager fileExistsAtPath:`
+  - SSL pinning: hook `SecTrustEvaluate`, `AFSecurityPolicy`, `TrustKit`
+  - Keychain: hook `SecItemCopyMatching`, `SecItemAdd`
+  - Crypto: hook `CCCrypt`, `SecKeyEncrypt`
+- Use spawn (not attach) for early interception of +load / __attribute__((constructor))
+- For ObjC: `ObjC.classes`, `ObjC.protocols`, `$ownMethods` enumeration
+- For Swift: bridge through ObjC runtime, or use `Module.findExportByName` for mangled names
+
+### Step 4: Dynamic Analysis — LLDB Debugging
+- Attach: `lldb -n "AppName"` or `process attach --name AppName`
+- Remote debug over USB: `debugserver *:1234 --attach=<pid>` on device, `process connect connect://<ip>:1234`
+- Key LLDB commands for iOS RE:
+  - `image list` — loaded dylibs and ASLR slide
+  - `image lookup -rn "ClassName"` — find methods by regex
+  - `br set -n "-[ClassName method:]"` — ObjC method breakpoint
+  - `register read` — check arguments (x0=self, x1=_cmd, x2+=args on ARM64)
+  - `memory read` / `x` — examine memory
+  - `po $x0` — print ObjC object (ARM64: x0 is first arg)
+  - `expression` — evaluate code in process context
+- Anti-debug: watch for `ptrace(PT_DENY_ATTACH)`, `sysctl(CTL_KERN, KERN_PROC)` checks
+- LLDB + Frida complementary: use Frida for broad monitoring, LLDB for precise single-step
+
 ## Available Tools
 
 ### Dynamic Analysis (requires running process)
