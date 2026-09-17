@@ -46,6 +46,7 @@ def _register_tools() -> None:
     from fridapilot.tools import binary_analysis
     from fridapilot.tools import pe_rva
     from fridapilot.tools import unpacker as unpacker_mod
+    from fridapilot.tools import apk_analysis
     from fridapilot.tools.lldb_bridge import LLDBBridge
 
     _lldb = LLDBBridge()
@@ -94,6 +95,10 @@ def _register_tools() -> None:
         "unpacker.unpack_upx": unpacker_mod.unpack_upx,
         "unpacker.dump_process_memory": unpacker_mod.dump_process_memory,
         "unpacker.auto_unpack": unpacker_mod.auto_unpack,
+        # APK/DEX analysis
+        "apk_analysis.analyze_apk": apk_analysis.analyze_apk,
+        "apk_analysis.analyze_dex": apk_analysis.analyze_dex,
+        "apk_analysis.detect_protections": apk_analysis.detect_protections,
     })
 
 
