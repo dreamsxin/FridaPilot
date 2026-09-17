@@ -482,19 +482,37 @@ def xrefs_rva_cmd(
     target: str = typer.Option(..., "--target", "-t", help="Target RVA to find references to."),
     start: str = typer.Option(..., "--start", help="Scan range start RVA."),
     end: str = typer.Option(..., "--end", help="Scan range end RVA."),
-    kinds: str = typer.Option("rip,call,jmp", "--kinds", "-k", help="Comma list: rip,call,jmp."),
+    kinds: str = typer.Option(
+        "rip,call,jmp", "--kinds", "-k",
+        help="Comma list: rip,call,jmp,imm64,ptr,rva32. Use 'ptr' (scan .rdata) "
+             "when a string is clearly used but rip finds nothing — it may live in "
+             "a const char* pointer table.",
+    ),
+    no_verify: bool = typer.Option(
+        False, "--no-verify",
+        help="Skip per-candidate capstone verification (faster, slightly noisier).",
+    ),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """RVA-aware xref scan: rip-relative data refs + direct call/jmp to a target RVA.
 
-    Example: find where parseInitJson references a config field string:
-      fp binary xrefs-rva chrome.dll --target 0xfae6439 --start 0x3201dd0 --end 0x320ac51
+    Byte-pattern scanning with capstone verification — linear disassembly of a large
+    .text desynchronises on embedded data and silently misses most references.
+
+    Examples:
+      # code referencing a config field string
+      fp binary xrefs-rva chrome.dll --target 0xfae6439 --start 0x1000 --end 0xf545000
+
+      # string referenced only from a pointer table (scan .rdata, not .text)
+      fp binary xrefs-rva chrome.dll --target 0xfb3dfc0 --start 0xf545000 \\
+          --end 0x11394000 --kinds ptr
     """
     import json as json_mod
     from fridapilot.tools.pe_rva import xrefs_to_rva
 
     kind_tuple = tuple(k.strip() for k in kinds.split(",") if k.strip())
-    results = xrefs_to_rva(binary, int(target, 0), int(start, 0), int(end, 0), kinds=kind_tuple)
+    results = xrefs_to_rva(binary, int(target, 0), int(start, 0), int(end, 0),
+                           kinds=kind_tuple, verify=not no_verify)
 
     if json_output:
         console.print(json_mod.dumps(results, indent=2, default=str))
@@ -503,5 +521,9 @@ def xrefs_rva_cmd(
     console.print(f"[bold]RVA xrefs to 0x{int(target,0):x}[/bold] "
                   f"in [0x{int(start,0):x},0x{int(end,0):x}) — {len(results)} found")
     for x in results:
-        console.print(f"  RVA 0x{x['from_rva']:08x}  [{x['kind']:<4s}]  "
+        console.print(f"  RVA 0x{x['from_rva']:08x}  [{x['kind']:<5s}]  "
                       f"{x['mnemonic']} {x['op_str']}")
+    if not results and "ptr" not in kind_tuple:
+        console.print("[dim]  Tip: 0 hits for a string that is clearly used? It may be "
+                      "in a const char* table — retry with --kinds ptr over .rdata.[/dim]")
+
