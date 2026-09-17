@@ -404,3 +404,104 @@ def analyze_cmd(
 
     if json_output:
         console.print(json_mod.dumps(combined, indent=2, default=str))
+
+
+# ── RVA-aware commands (ImageBase-correct; see tools/pe_rva.py) ──
+
+
+@binary_app.command("disasm-rva")
+def disasm_rva_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file (.dll/.exe)."),
+    rva: str = typer.Option(..., "--rva", "-r", help="Start RVA (hex/decimal), NOT a file offset."),
+    count: int = typer.Option(40, "--count", "-n", help="Number of instructions."),
+    symbols: str = typer.Option("", "--symbols", "-s", help="Symbol map 'rva:name,rva:name' (hex rva)."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """RVA-aware disassembly: correct ImageBase, annotated rip-relative & call targets.
+
+    Use this instead of `disassemble` for real PEs whose section RVA differs from
+    the file offset (e.g. chrome.dll). Rip-relative data references and call/jmp
+    targets are resolved to RVA and tagged with any supplied symbol names.
+    """
+    import json as json_mod
+    from fridapilot.tools.pe_rva import disassemble_rva
+
+    sym_map: dict[int, str] = {}
+    if symbols:
+        for pair in symbols.split(","):
+            if ":" in pair:
+                k, v = pair.split(":", 1)
+                sym_map[int(k.strip(), 0)] = v.strip()
+
+    result = disassemble_rva(binary, int(rva, 0), count=count, symbols=sym_map)
+
+    if json_output:
+        console.print(json_mod.dumps(result, indent=2, default=str))
+        return
+
+    if result.get("error"):
+        console.print(f"[red]{result['error']}[/red]")
+        return
+    console.print(f"[bold]Disassembly[/bold] @ RVA 0x{result['start_rva']:x} "
+                  f"(ImageBase 0x{result['image_base']:x})")
+    for ln in result["lines"]:
+        note = f"  [cyan]{ln['note']}[/cyan]" if ln["note"] else ""
+        console.print(f"  RVA 0x{ln['rva']:08x}  {ln['bytes_hex']:<20s}  "
+                      f"{ln['mnemonic']:<8s} {ln['op_str']}{note}")
+
+
+@binary_app.command("find-string-rva")
+def find_string_rva_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file."),
+    needles: str = typer.Argument(..., help="Comma-separated exact strings to locate."),
+    encoding: str = typer.Option("ascii", "--encoding", "-e", help="ascii or utf16le."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Locate exact strings and report their RVA (for subsequent xrefs/disasm)."""
+    import json as json_mod
+    from fridapilot.tools.pe_rva import find_string_rvas
+
+    needle_list = [n for n in needles.split(",") if n]
+    results = find_string_rvas(binary, needle_list, encoding=encoding)
+
+    if json_output:
+        console.print(json_mod.dumps(results, indent=2, default=str))
+        return
+
+    console.print(f"[bold]String RVA lookup[/bold] ({len(results)} hits)")
+    for r in results:
+        if r["rva"] is None:
+            console.print(f"  [dim]not found:[/dim] {r['needle'][:60]}")
+        else:
+            console.print(f"  RVA 0x{r['rva']:08x}  off 0x{r['offset']:08x}  {r['needle'][:80]}")
+
+
+@binary_app.command("xrefs-rva")
+def xrefs_rva_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file."),
+    target: str = typer.Option(..., "--target", "-t", help="Target RVA to find references to."),
+    start: str = typer.Option(..., "--start", help="Scan range start RVA."),
+    end: str = typer.Option(..., "--end", help="Scan range end RVA."),
+    kinds: str = typer.Option("rip,call,jmp", "--kinds", "-k", help="Comma list: rip,call,jmp."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """RVA-aware xref scan: rip-relative data refs + direct call/jmp to a target RVA.
+
+    Example: find where parseInitJson references a config field string:
+      fp binary xrefs-rva chrome.dll --target 0xfae6439 --start 0x3201dd0 --end 0x320ac51
+    """
+    import json as json_mod
+    from fridapilot.tools.pe_rva import xrefs_to_rva
+
+    kind_tuple = tuple(k.strip() for k in kinds.split(",") if k.strip())
+    results = xrefs_to_rva(binary, int(target, 0), int(start, 0), int(end, 0), kinds=kind_tuple)
+
+    if json_output:
+        console.print(json_mod.dumps(results, indent=2, default=str))
+        return
+
+    console.print(f"[bold]RVA xrefs to 0x{int(target,0):x}[/bold] "
+                  f"in [0x{int(start,0):x},0x{int(end,0):x}) — {len(results)} found")
+    for x in results:
+        console.print(f"  RVA 0x{x['from_rva']:08x}  [{x['kind']:<4s}]  "
+                      f"{x['mnemonic']} {x['op_str']}")

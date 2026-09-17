@@ -113,6 +113,9 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp binary search-bytes <file> <pattern>` | 字节模式搜索（支持 `??` 通配符） | ❌ |
 | `fp binary xrefs --address <addr>` | 交叉引用查找（CALL/JMP） | ❌ |
 | `fp binary analyze-go <file>` | Go 二进制分析（版本/包/函数/源码路径） | ❌ |
+| `fp binary find-string-rva <file>` | 定位字符串并返回 RVA（区分文件偏移/RVA） | ❌ |
+| `fp binary xrefs-rva <file>` | RVA-aware 交叉引用（rip-relative 数据引用 + CALL/JMP） | ❌ |
+| `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
 | `fp run "<自然语言>"` | AI Agent 闭环执行任务 | ✅ |
 
 ---
@@ -199,6 +202,36 @@ fp binary analyze-go ipc-server.exe
 - 字节模式搜索（支持 `??` 通配符，类似 IDA 搜索）
 - CALL/JMP 交叉引用分析
 - Go 二进制元数据提取（版本、包路径、函数列表、源码文件）
+
+### RVA-aware 反汇编与交叉引用（大型 PE 精确分析）
+
+`disassemble` / `xrefs` 把传入地址同时当作**文件偏移和虚拟地址**，只有当节区 RVA == 文件偏移且 ImageBase == 0 时才正确。对真实 PE（ImageBase 非 0、`.text` 等节区 RVA ≠ 文件偏移，尤其数百 MB 的大型 DLL），rip-relative 引用和 call/jmp 目标会解析错误，静默误导逆向。
+
+`tools/pe_rva.py` 通过节区表在 RVA / VA / 文件偏移之间精确换算，提供 3 个 RVA-aware 命令：
+
+```bash
+# 1. 定位字符串并返回其 RVA（而非文件偏移），供后续 xref/disasm 使用
+fp binary find-string-rva target.dll "field_name_a,field_name_b"
+fp binary find-string-rva target.dll "宽字符" --encoding utf16le
+
+# 2. RVA-aware 交叉引用：在指定 RVA 区间内查找对目标 RVA 的引用
+#    kinds 支持 rip（rip-relative 数据引用，如代码按 RVA 取字符串/全局）、call、jmp
+fp binary xrefs-rva target.dll --target 0x1234abcd --start 0x1000 --end 0x200000
+fp binary xrefs-rva target.dll --target 0x1234abcd --start 0x1000 --end 0x200000 --kinds rip
+
+# 3. RVA-aware 反汇编：ImageBase 正确，自动标注 rip-relative 目标 RVA 与 call/jmp 目标
+#    --symbols 传入 'rva:name,rva:name' 可为已知地址打标签
+fp binary disasm-rva target.dll --rva 0x1000 --count 60
+fp binary disasm-rva target.dll --rva 0x1000 -n 60 --symbols 0x1234abcd:parse_field,0x2000:helper
+```
+
+能力：
+- 节区感知的 RVA ↔ VA ↔ 文件偏移互转，`in_file()` 可识别 BSS（文件中无数据的未初始化 .data）
+- rip-relative 操作数解析到目标 RVA，命中 `--symbols` 时附带符号名
+- call/jmp 目标换算为 RVA 并标注
+- xrefs 支持 rip-relative 数据引用扫描（定位"代码在哪里按 RVA 引用某字符串/全局"）
+
+典型工作流：`find-string-rva` 拿到字段名 RVA → `xrefs-rva` 找到解析该字段的代码 → `disasm-rva` 反汇编确认逻辑。Python SDK 亦可 `from fridapilot.tools.pe_rva import PEImage, disassemble_rva, xrefs_to_rva, find_string_rvas`。
 
 ### Crypto Reverse — 二进制加密逆向分析
 
