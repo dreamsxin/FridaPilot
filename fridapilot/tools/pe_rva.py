@@ -39,6 +39,7 @@ class PEImage:
         self._pe = pefile.PE(self.path, fast_load=True)
         self.image_base = self._pe.OPTIONAL_HEADER.ImageBase
         self.is_64bit = self._pe.FILE_HEADER.Machine == 0x8664
+        self._pdata: list[tuple[int, int, int]] | None = None
         self._sections: list[tuple[int, int, int, int, str]] = []
         for s in self._pe.sections:
             self._sections.append((
@@ -95,25 +96,47 @@ class PEImage:
                 return name
         return ""
 
-    def exception_table(self) -> list[tuple[int, int]] | None:
-        """Return sorted list of (begin_rva, end_rva) from .pdata, or None.
+    def exception_table(self) -> list[tuple[int, int, int]]:
+        """``.pdata`` RUNTIME_FUNCTION entries as (begin_rva, end_rva, unwind_rva).
 
-        Only available on x64 PE images. Used by xrefs_to_rva for
-        filtering false-positive RIP candidates that land between functions.
+        Empty for images without ``.pdata`` (32-bit PE). Bounds use
+        ``min(VirtualSize, SizeOfRawData)``: SizeOfRawData is file-aligned, so
+        walking it would parse alignment padding as entries (and can read past the
+        section when the size is not a multiple of 12). The table is already sorted
+        by BeginAddress and is cached per image — callers may scan it repeatedly.
         """
+        if self._pdata is not None:
+            return self._pdata
         import struct as _st
-        for va, _vs, praw, rsize, name in self._sections:
-            if name == ".pdata":
-                entries: list[tuple[int, int]] = []
-                for off in range(praw, praw + rsize, 12):
-                    begin = _st.unpack_from("<I", self._data, off)[0]
-                    end = _st.unpack_from("<I", self._data, off + 4)[0]
-                    if begin == 0 and end == 0:
-                        break
-                    entries.append((begin, end))
-                entries.sort()
-                return entries
+        entries: list[tuple[int, int, int]] = []
+        for _va, vs, praw, rsize, name in self._sections:
+            if name != ".pdata":
+                continue
+            size = min(vs, rsize) if vs else rsize
+            for i in range(size // 12):
+                begin, end, unwind = _st.unpack_from("<III", self._data, praw + i * 12)
+                if begin == 0 and end == 0:
+                    break
+                entries.append((begin, end, unwind))
+            break
+        self._pdata = entries
+        return entries
+
+    def function_at(self, rva: int) -> tuple[int, int, int] | None:
+        """Containing RUNTIME_FUNCTION for an RVA (binary search), or None."""
+        table = self.exception_table()
+        lo, hi = 0, len(table) - 1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            begin, end, unwind = table[mid]
+            if rva < begin:
+                hi = mid - 1
+            elif rva >= end:
+                lo = mid + 1
+            else:
+                return begin, end, unwind
         return None
+
 
 
 def find_string_rvas(
@@ -229,32 +252,14 @@ def function_bounds(
     Returns {begin_rva, end_rva, size, unwind_info_rva} or None when the RVA is a
     leaf function (no entry) or outside .pdata coverage.
     """
-    import struct
-
     img = PEImage(binary_path)
-    pdata = None
-    for va, vs, praw, rsize, name in img._sections:
-        if name == ".pdata":
-            pdata = (va, min(vs, rsize), praw)
-            break
-    if pdata is None:
+    found = img.function_at(rva)
+    if found is None:
         return None
-    _pva, psize, ppraw = pdata
-    count = psize // 12
-    blob = img._data[ppraw:ppraw + count * 12]
+    begin, end, unwind = found
+    return {"begin_rva": begin, "end_rva": end,
+            "size": end - begin, "unwind_info_rva": unwind}
 
-    lo, hi = 0, count - 1
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        begin, end, unwind = struct.unpack_from("<III", blob, mid * 12)
-        if rva < begin:
-            hi = mid - 1
-        elif rva >= end:
-            lo = mid + 1
-        else:
-            return {"begin_rva": begin, "end_rva": end,
-                    "size": end - begin, "unwind_info_rva": unwind}
-    return None
 
 
 def field_refs(
@@ -433,7 +438,123 @@ def field_refs(
 
 
 
+def _iter_rip_refs(
+    img: PEImage,
+    md: Any,
+    data: bytes,
+    scan_start_rva: int,
+    scan_end_rva: int,
+    is_target: Any,
+    verify: bool = True,
+    scan_gaps: bool = True,
+):
+    """Yield (from_rva, target_rva, mnemonic, op_str, size) for rip-relative refs
+    whose resolved target satisfies ``is_target(target_rva)``.
+
+    Two complementary passes, because neither alone is enough:
+
+    A. **Linear disassembly inside every ``.pdata`` RUNTIME_FUNCTION** intersecting
+       the range. Function bounds are exact, so linear decoding cannot drift into
+       inter-function data the way a whole-section sweep does, and capstone handles
+       every encoding form. An opcode whitelist structurally cannot: measured on
+       ntdll.dll, whitelisting caps recall at ~95% and the misses are systematic —
+       ``F0`` (lock cmpxchg/inc/and on a global, i.e. exactly the singletons and
+       refcounts one is looking for), ``66``/``F2``/``F3`` (word stores, movsd,
+       movdqa/movdqu) and VEX/EVEX, all of which put prefixes ahead of the opcode.
+       Padding or a jump table inside a function only costs a one-byte resync.
+
+    B. **Opcode-agnostic disp32 scan over the ranges ``.pdata`` does not cover**
+       (leaf functions, hand-written asm, packed code, 32-bit images, data
+       sections). A rip operand always has ModRM mod=00 / rm=101 immediately before
+       the 4-byte displacement, so candidates are found by displacement arithmetic
+       instead of an opcode table, then confirmed by decoding from up to 8 bytes
+       back (prefixes + 1-2 byte opcode + ModRM).
+
+    Args:
+        is_target: predicate on the resolved target RVA (equality for one target,
+            set membership for many).
+        verify: decode pass-B candidates with capstone. Pass A always decodes.
+        scan_gaps: run pass B. False = strict ``.pdata``-only mode, which trades
+            recall outside known functions for precision in data-heavy ranges.
+    """
+    import struct as _st
+
+    from capstone import x86 as cx86
+
+    base = img.image_base
+    n = len(data)
+
+    def rip_target(insn) -> int | None:
+        for op in insn.operands:
+            if op.type == cx86.X86_OP_MEM and op.mem.base == cx86.X86_REG_RIP:
+                return insn.address + insn.size + op.mem.disp - base
+        return None
+
+    # ── pass A: decode .pdata-covered functions ──
+    covered: list[tuple[int, int]] = []
+    for begin, end, _unwind in img.exception_table():
+        if end <= scan_start_rva or begin >= scan_end_rva:
+            continue
+        lo, hi = max(begin, scan_start_rva), min(end, scan_end_rva)
+        covered.append((lo, hi))
+        pos = lo
+        while pos < hi:
+            progressed = False
+            for insn in md.disasm(data[pos - scan_start_rva:hi - scan_start_rva],
+                                  base + pos):
+                progressed = True
+                pos = insn.address - base + insn.size
+                tgt = rip_target(insn)
+                if tgt is not None and is_target(tgt):
+                    yield (insn.address - base, tgt,
+                           insn.mnemonic, insn.op_str, insn.size)
+            if not progressed:
+                pos += 1  # data byte inside the function: resync and continue
+
+    if not scan_gaps:
+        return
+
+    # ── pass B: displacement scan over the uncovered remainder ──
+    covered.sort()
+    gaps: list[tuple[int, int]] = []
+    cur = scan_start_rva
+    for lo, hi in covered:
+        if lo > cur:
+            gaps.append((cur, lo))
+        cur = max(cur, hi)
+    if cur < scan_end_rva:
+        gaps.append((cur, scan_end_rva))
+
+    for lo, hi in gaps:
+        for i in range(max(lo - scan_start_rva, 1), min(hi - scan_start_rva, n - 4)):
+            if (data[i - 1] & 0xC7) != 0x05:  # ModRM: mod=00, rm=101 (rip+disp32)
+                continue
+            disp = _st.unpack_from("<i", data, i)[0]
+            end_rva = scan_start_rva + i + 4
+            for imm in (0, 1, 2, 4):  # trailing immediate widths
+                if not is_target(end_rva + imm + disp):
+                    continue
+                if not verify:
+                    yield (scan_start_rva + i - 2, end_rva + imm + disp,
+                           "(unverified)", "[rip%+d]" % disp, 0)
+                    break
+                for back in range(2, 9):
+                    if i - back < 0:
+                        break
+                    insn = next(iter(md.disasm(data[i - back:i - back + 16],
+                                              base + scan_start_rva + i - back)), None)
+                    if insn is None or insn.size < back + 4:
+                        continue  # displacement not inside this instruction
+                    tgt = rip_target(insn)
+                    if tgt is not None and is_target(tgt):
+                        yield (insn.address - base, tgt,
+                               insn.mnemonic, insn.op_str, insn.size)
+                        break
+                break
+
+
 def map_refs_to_functions(
+
 
     binary_path: str | Path,
     targets: dict[str, int],
@@ -463,7 +584,6 @@ def map_refs_to_functions(
     import struct
 
     import capstone
-    from capstone import x86 as cx86
 
     img = PEImage(binary_path)
     md = capstone.Cs(capstone.CS_ARCH_X86,
@@ -474,19 +594,12 @@ def map_refs_to_functions(
         return {"functions": [], "orphans": [], "unreferenced": list(targets),
                 "scanned_bytes": 0}
 
+
     base = img.image_base
     by_rva: dict[int, list[str]] = {}
     for label, rva in targets.items():
         by_rva.setdefault(rva, []).append(label)
     va_set = {base + r: r for r in by_rva}
-
-    RIP_OPCODES = frozenset((
-        0x8D, 0x8B, 0x89, 0x8A, 0x88, 0x63, 0x85, 0xF6, 0xFE,
-        0xFF, 0xC6, 0xC7, 0x80, 0x83, 0x81,
-        0x03, 0x2B, 0x3B, 0x33, 0x0B, 0x23,
-        0x01, 0x29, 0x39, 0x31, 0x09, 0x21,
-        0x38, 0x3A,
-    ))
 
     hits: list[tuple[int, int, int]] = []  # (from_rva, target_rva, insn_size)
     n = len(data)
@@ -494,55 +607,23 @@ def map_refs_to_functions(
     want_ptr = "ptr" in kinds
     want_imm = "imm64" in kinds
 
-    for i in range(n - 9):
-        b0 = data[i]
-        if want_rip:
-            for pfx in (1, 0):
-                if pfx and not (0x40 <= b0 <= 0x4F):
-                    continue
-                op_i = i + pfx
-                if op_i + 6 >= n:
-                    continue
-                opc = data[op_i]
-                if opc == 0x0F:
-                    if (data[op_i + 2] & 0xC7) != 0x05:
-                        continue
-                    disp_at, ilen = op_i + 3, (op_i + 7) - i
-                elif opc in RIP_OPCODES:
-                    if (data[op_i + 1] & 0xC7) != 0x05:
-                        continue
-                    disp_at, ilen = op_i + 2, (op_i + 6) - i
-                else:
-                    continue
-                disp = struct.unpack_from("<i", data, disp_at)[0]
-                cand = scan_start_rva + i
-                for extra in (0, 1, 2, 4):
-                    tgt = cand + ilen + extra + disp
-                    if tgt not in by_rva:
-                        continue
-                    off = cand - scan_start_rva
-                    insn = next(iter(md.disasm(data[off:off + 16], base + cand)), None)
-                    if insn is None:
-                        continue
-                    real = None
-                    for op in insn.operands:
-                        if op.type == cx86.X86_OP_MEM and op.mem.base == cx86.X86_REG_RIP:
-                            real = insn.address + insn.size + op.mem.disp - base
-                            break
-                    if real in by_rva:
-                        hits.append((cand, real, insn.size))
-                    break
-                else:
-                    continue
-                break
-        if want_imm and b0 in (0x48, 0x49) and 0xB8 <= data[i + 1] <= 0xBF:
-            va = struct.unpack_from("<Q", data, i + 2)[0]
-            if va in va_set:
-                hits.append((scan_start_rva + i, va_set[va], 10))
-        if want_ptr:
-            va = struct.unpack_from("<Q", data, i)[0]
-            if va in va_set:
-                hits.append((scan_start_rva + i, va_set[va], 8))
+    if want_rip:
+        for from_rva, tgt, _mnem, _op, size in _iter_rip_refs(
+                img, md, data, scan_start_rva, scan_end_rva, lambda t: t in by_rva):
+            hits.append((from_rva, tgt, size))
+
+    if want_imm or want_ptr:
+        for i in range(n - 9):
+            b0 = data[i]
+            if want_imm and b0 in (0x48, 0x49) and 0xB8 <= data[i + 1] <= 0xBF:
+                va = struct.unpack_from("<Q", data, i + 2)[0]
+                if va in va_set:
+                    hits.append((scan_start_rva + i, va_set[va], 10))
+            if want_ptr:
+                va = struct.unpack_from("<Q", data, i)[0]
+                if va in va_set:
+                    hits.append((scan_start_rva + i, va_set[va], 8))
+
 
     # drop refs that fall inside an earlier instruction (REX-less double reading)
     hits.sort()
@@ -554,39 +635,20 @@ def map_refs_to_functions(
         pruned.append((from_rva, tgt))
         covered = from_rva + size
 
-    # group by .pdata function. Load the RUNTIME_FUNCTION table once — calling
-    # function_bounds() per hit would re-read the whole PE each time.
-    pdata_blob = b""
-    for va, vs, praw, rsize, name in img._sections:
-        if name == ".pdata":
-            pdata_blob = img._data[praw:praw + min(vs, rsize)]
-            break
-    pcount = len(pdata_blob) // 12
-
-    def _lookup(rva: int):
-        lo, hi = 0, pcount - 1
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            begin, end, _unwind = struct.unpack_from("<III", pdata_blob, mid * 12)
-            if rva < begin:
-                hi = mid - 1
-            elif rva >= end:
-                lo = mid + 1
-            else:
-                return begin, end
-        return None
-
+    # group by .pdata function (PEImage caches the RUNTIME_FUNCTION table, so the
+    # per-hit lookup is a binary search over an already-parsed list)
     funcs: dict[int, dict[str, Any]] = {}
     orphans: list[dict[str, Any]] = []
     referenced: set[int] = set()
     for from_rva, tgt in pruned:
         referenced.add(tgt)
         label = by_rva[tgt][0]
-        fb = _lookup(from_rva)
+        fb = img.function_at(from_rva)
         if fb is None:
             orphans.append({"label": label, "from_rva": from_rva})
             continue
-        begin, end = fb
+        begin, end, _unwind = fb
+
         entry = funcs.setdefault(begin, {
             "begin_rva": begin, "end_rva": end, "size": end - begin,
             "labels": [], "refs": [],
@@ -615,18 +677,21 @@ def xrefs_to_rva(
     scan_end_rva: int,
     kinds: tuple[str, ...] = ("rip", "call", "jmp"),
     verify: bool = True,
+    scan_gaps: bool = True,
 ) -> list[dict[str, Any]]:
     """RVA-aware cross-reference scan within [scan_start_rva, scan_end_rva).
 
-    Uses **byte-pattern scanning plus per-candidate capstone verification**, not
-    linear disassembly. Linear ``md.disasm()`` over a large ``.text`` silently
-    terminates at the first non-instruction byte (jump tables, alignment padding,
-    constant pools), so references beyond that point are missed entirely — on a
-    245 MB chrome.dll that means almost everything. Byte scanning does not depend
-    on instruction-stream synchronisation and therefore cannot lose alignment.
+    Rip-relative references are found by **disassembling each ``.pdata``
+    RUNTIME_FUNCTION**, falling back to an **opcode-agnostic displacement scan**
+    where ``.pdata`` has no coverage (see ``_iter_rip_refs``). A single linear
+    ``md.disasm()`` over a whole ``.text`` is not usable: it terminates at the first
+    non-instruction byte (jump tables, alignment padding, constant pools), so on a
+    245 MB chrome.dll almost everything past the first gap is lost. Function bounds
+    give the synchronisation points that a flat sweep lacks. Absolute kinds (call /
+    jmp / imm64 / ptr / rva32) stay pure byte scans — their encodings are fixed.
 
     Kinds:
-      - "rip":   rip-relative operand (LEA / MOV / CMP / ...) resolving to target
+      - "rip":   rip-relative operand (LEA / MOV / CMP / LOCK CMPXCHG / SSE / ...)
       - "call":  direct ``E8 rel32``
       - "jmp":   direct ``E9 rel32`` (and short ``EB rel8``)
       - "imm64": ``MOV r64, imm64`` loading ImageBase+target_rva
@@ -638,15 +703,19 @@ def xrefs_to_rva(
     have no rip-relative reference at all.
 
     Args:
-        verify: decode each rip candidate with capstone to confirm the operand and
-            instruction length. Set False for a faster, slightly noisier scan.
+        verify: decode displacement-scan candidates with capstone to confirm the
+            operand and instruction length. The ``.pdata`` pass always decodes.
+            False is faster and noisier.
+        scan_gaps: also scan the ranges ``.pdata`` does not cover (leaf functions,
+            hand-written asm, packed code, 32-bit images, data sections). False =
+            strict ``.pdata``-only mode: fewer false positives when the range spans
+            data, at the cost of missing references outside known functions.
 
-    Returns list of {from_rva, mnemonic, op_str, target_rva, kind}.
+    Returns list of {from_rva, mnemonic, op_str, target_rva, kind, size}.
     """
     import struct
 
     import capstone
-    from capstone import x86 as cx86
 
     img = PEImage(binary_path)
     md = capstone.Cs(capstone.CS_ARCH_X86,
@@ -662,43 +731,6 @@ def xrefs_to_rva(
     out: list[dict[str, Any]] = []
     n = len(data)
 
-    # Opcodes that commonly carry a rip-relative memory operand. The ModRM byte
-    # must have mod=00 and rm=101, i.e. (modrm & 0xC7) == 0x05.
-    RIP_OPCODES = frozenset((
-        0x8D,  # lea
-        0x8B,  # mov r, m (dword/qword)
-        0x89,  # mov m, r (dword/qword)
-        0x8A,  # mov r8, m8
-        0x88,  # mov m8, r8  ← (e.g. 40 88 35 xx = mov byte [rip+disp], sil)
-        0x63,  # movsxd
-        0x03, 0x2B, 0x3B, 0x33, 0x0B, 0x23,  # add/sub/cmp/xor/or/and r, m
-        0x01, 0x29, 0x39, 0x31, 0x09, 0x21,  # ... m, r
-        0x38,  # cmp m8, r8
-        0x3A,  # cmp r8, m8
-        0x85,  # test r, m
-        0xF6,  # test/not/neg/mul/div m8, imm8/--
-        0xFE,  # inc/dec m8
-        0xFF,  # inc/dec/call/jmp/push m
-        0xC6,  # mov m8, imm8  ← (e.g. C6 05 xx xx xx xx 01 = mov byte [rip+disp], 1)
-        0xC7,  # mov m, imm32
-        0x80,  # arith m8, imm8  ← (e.g. 80 3D xx = cmp byte [rip+disp], imm)
-        0x83, 0x81,  # arith m, imm8/imm32
-    ))
-
-    def _decode_at(rva: int, want_len_hint: int = 16):
-        off = rva - scan_start_rva
-        if off < 0 or off >= n:
-            return None
-        for insn in md.disasm(data[off:off + want_len_hint], base + rva):
-            return insn
-        return None
-
-    def _rip_target(insn) -> int | None:
-        for op in insn.operands:
-            if op.type == cx86.X86_OP_MEM and op.mem.base == cx86.X86_REG_RIP:
-                return insn.address + insn.size + op.mem.disp - base
-        return None
-
     seen: set[tuple[int, str]] = set()
 
     def _emit(from_rva: int, kind: str, mnemonic: str, op_str: str, size: int = 0):
@@ -709,52 +741,16 @@ def xrefs_to_rva(
         out.append({"from_rva": from_rva, "mnemonic": mnemonic, "op_str": op_str,
                     "target_rva": target_rva, "kind": kind, "size": size})
 
+    # ── rip-relative ──
+    if "rip" in want:
+        for from_rva, _tgt, mnem, op_str, size in _iter_rip_refs(
+                img, md, data, scan_start_rva, scan_end_rva,
+                lambda t: t == target_rva, verify=verify, scan_gaps=scan_gaps):
+            _emit(from_rva, "rip", mnem, op_str, size)
 
+    # ── absolute encodings: fixed-shape byte scans ──
     for i in range(n - 9):
         b0 = data[i]
-
-        # ── rip-relative ──
-        if "rip" in want:
-            # optional REX prefix (40-4F), then opcode, then ModRM
-            for pfx in (1, 0):
-                if pfx and not (0x40 <= b0 <= 0x4F):
-                    continue
-                op_i = i + pfx
-                if op_i + 5 >= n:
-                    continue
-                opc = data[op_i]
-                if opc == 0x0F:  # two-byte opcode
-                    if op_i + 6 >= n or (data[op_i + 2] & 0xC7) != 0x05:
-                        continue
-                    disp_at, ilen = op_i + 3, (op_i + 3 + 4) - i
-                elif opc in RIP_OPCODES:
-                    if (data[op_i + 1] & 0xC7) != 0x05:
-                        continue
-                    disp_at, ilen = op_i + 2, (op_i + 2 + 4) - i
-                else:
-                    continue
-                if disp_at + 4 > n:
-                    continue
-                disp = struct.unpack_from("<i", data, disp_at)[0]
-                cand_rva = scan_start_rva + i
-                # ``ilen`` is the length up to the end of disp32; opcodes carrying a
-                # trailing immediate (C7/83/81) are 1/2/4 bytes longer. Probe those
-                # tails cheaply, then let capstone settle the real length.
-                for extra in (0, 1, 2, 4):
-                    if cand_rva + ilen + extra + disp != target_rva:
-                        continue
-                    if not verify:
-                        _emit(cand_rva, "rip", "(unverified)", "[rip%+d]" % disp)
-                        break
-                    insn = _decode_at(cand_rva)
-                    if insn is not None and _rip_target(insn) == target_rva:
-                        _emit(cand_rva, "rip", insn.mnemonic, insn.op_str, insn.size)
-                        break
-
-                else:
-                    continue
-                break
-
 
         # ── direct call / jmp rel32 ──
         if (b0 == 0xE8 and "call" in want) or (b0 == 0xE9 and "jmp" in want):
@@ -762,6 +758,7 @@ def xrefs_to_rva(
             if scan_start_rva + i + 5 + rel == target_rva:
                 kind = "call" if b0 == 0xE8 else "jmp"
                 _emit(scan_start_rva + i, kind, kind, "0x%x" % target_va)
+
 
         # ── short jmp rel8 ──
         if b0 == 0xEB and "jmp" in want:
@@ -782,10 +779,12 @@ def xrefs_to_rva(
 
     out.sort(key=lambda r: r["from_rva"])
 
-    # Drop candidates that fall *inside* an earlier instruction. Scanning byte by
-    # byte finds both ``4C 8D 35 ...`` (lea r14) and the REX-less reading one byte
-    # later (``8D 35 ...`` -> lea esi), which resolve to the same target. Only the
-    # outermost decode is a real reference.
+    # Drop candidates that fall *inside* an earlier instruction. The displacement
+    # scan can decode a shorter instruction starting one byte into a longer real one
+    # (e.g. ``shufps`` out of the middle of ``mov byte [rip+disp], 1``); both resolve
+    # to the same target, but only the outermost decode is a real reference. This
+    # needs the real instruction to be found first, which is why the .pdata pass
+    # (exact bounds, exact sizes) runs before the byte scan.
     deduped: list[dict[str, Any]] = []
     covered_until = -1
     for rec in out:
@@ -795,27 +794,7 @@ def xrefs_to_rva(
         if rec.get("size"):
             covered_until = rec["from_rva"] + rec["size"]
 
-    # Optionally filter by .pdata function bounds: discard rip candidates that
-    # don't fall within any RUNTIME_FUNCTION entry.  This eliminates false
-    # positives from mid-instruction byte alignments.
-    if verify and deduped:
-        try:
-            pdata = img.exception_table()
-            if pdata:
-                valid: list[dict[str, Any]] = []
-                for rec in deduped:
-                    if rec["kind"] != "rip":
-                        valid.append(rec)
-                        continue
-                    rva = rec["from_rva"]
-                    # binary search or linear scan — pdata is sorted
-                    in_func = any(e[0] <= rva < e[1] for e in pdata)
-                    if in_func:
-                        valid.append(rec)
-                deduped = valid
-        except Exception:
-            pass  # no .pdata → skip validation
-
     return deduped
+
 
 
