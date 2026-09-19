@@ -95,6 +95,26 @@ class PEImage:
                 return name
         return ""
 
+    def exception_table(self) -> list[tuple[int, int]] | None:
+        """Return sorted list of (begin_rva, end_rva) from .pdata, or None.
+
+        Only available on x64 PE images. Used by xrefs_to_rva for
+        filtering false-positive RIP candidates that land between functions.
+        """
+        import struct as _st
+        for va, _vs, praw, rsize, name in self._sections:
+            if name == ".pdata":
+                entries: list[tuple[int, int]] = []
+                for off in range(praw, praw + rsize, 12):
+                    begin = _st.unpack_from("<I", self._data, off)[0]
+                    end = _st.unpack_from("<I", self._data, off + 4)[0]
+                    if begin == 0 and end == 0:
+                        break
+                    entries.append((begin, end))
+                entries.sort()
+                return entries
+        return None
+
 
 def find_string_rvas(
     binary_path: str | Path,
@@ -461,9 +481,11 @@ def map_refs_to_functions(
     va_set = {base + r: r for r in by_rva}
 
     RIP_OPCODES = frozenset((
-        0x8D, 0x8B, 0x89, 0x63, 0x85, 0xFF, 0xC7, 0x83, 0x81,
+        0x8D, 0x8B, 0x89, 0x8A, 0x88, 0x63, 0x85, 0xF6, 0xFE,
+        0xFF, 0xC6, 0xC7, 0x80, 0x83, 0x81,
         0x03, 0x2B, 0x3B, 0x33, 0x0B, 0x23,
         0x01, 0x29, 0x39, 0x31, 0x09, 0x21,
+        0x38, 0x3A,
     ))
 
     hits: list[tuple[int, int, int]] = []  # (from_rva, target_rva, insn_size)
@@ -644,14 +666,22 @@ def xrefs_to_rva(
     # must have mod=00 and rm=101, i.e. (modrm & 0xC7) == 0x05.
     RIP_OPCODES = frozenset((
         0x8D,  # lea
-        0x8B,  # mov r, m
-        0x89,  # mov m, r
+        0x8B,  # mov r, m (dword/qword)
+        0x89,  # mov m, r (dword/qword)
+        0x8A,  # mov r8, m8
+        0x88,  # mov m8, r8  ← (e.g. 40 88 35 xx = mov byte [rip+disp], sil)
         0x63,  # movsxd
         0x03, 0x2B, 0x3B, 0x33, 0x0B, 0x23,  # add/sub/cmp/xor/or/and r, m
         0x01, 0x29, 0x39, 0x31, 0x09, 0x21,  # ... m, r
-        0x85,  # test
+        0x38,  # cmp m8, r8
+        0x3A,  # cmp r8, m8
+        0x85,  # test r, m
+        0xF6,  # test/not/neg/mul/div m8, imm8/--
+        0xFE,  # inc/dec m8
         0xFF,  # inc/dec/call/jmp/push m
+        0xC6,  # mov m8, imm8  ← (e.g. C6 05 xx xx xx xx 01 = mov byte [rip+disp], 1)
         0xC7,  # mov m, imm32
+        0x80,  # arith m8, imm8  ← (e.g. 80 3D xx = cmp byte [rip+disp], imm)
         0x83, 0x81,  # arith m, imm8/imm32
     ))
 
@@ -764,6 +794,28 @@ def xrefs_to_rva(
         deduped.append(rec)
         if rec.get("size"):
             covered_until = rec["from_rva"] + rec["size"]
+
+    # Optionally filter by .pdata function bounds: discard rip candidates that
+    # don't fall within any RUNTIME_FUNCTION entry.  This eliminates false
+    # positives from mid-instruction byte alignments.
+    if verify and deduped:
+        try:
+            pdata = img.exception_table()
+            if pdata:
+                valid: list[dict[str, Any]] = []
+                for rec in deduped:
+                    if rec["kind"] != "rip":
+                        valid.append(rec)
+                        continue
+                    rva = rec["from_rva"]
+                    # binary search or linear scan — pdata is sorted
+                    in_func = any(e[0] <= rva < e[1] for e in pdata)
+                    if in_func:
+                        valid.append(rec)
+                deduped = valid
+        except Exception:
+            pass  # no .pdata → skip validation
+
     return deduped
 
 
