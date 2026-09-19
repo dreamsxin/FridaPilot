@@ -23,9 +23,15 @@ Commands (GDB-style):
     info threads             List threads
     set <addr> <hex>         Write memory
     resolve <module!export>  Resolve symbol to address
+    session create <n> --target <proc> [--spawn]
+                             Attach an extra process as a named session
+    session list|switch <n>|remove <n>
+                             Manage sessions; switch routes all commands to one
+    wait-any [timeout]       Wait for a hit from any session
     help                     Show this help
     q/quit                   Detach and exit
 """
+
 
 import typer
 from rich.console import Console
@@ -75,7 +81,10 @@ def dbg_cmd(
     try:
         while True:
             try:
-                raw = console.input("[bold cyan]fp-dbg>[/bold cyan] ").strip()
+                label = multi_state.get("active_session") or ""
+                raw = console.input(
+                    "[bold cyan]fp-dbg%s>[/bold cyan] " % (":" + label if label else "")
+                ).strip()
             except (EOFError, KeyboardInterrupt):
                 break
 
@@ -85,6 +94,10 @@ def dbg_cmd(
             parts = raw.split(None, 1)
             cmd = parts[0].lower()
             args_str = parts[1] if len(parts) > 1 else ""
+
+            # Everything below acts on the active session (`session switch`), or on
+            # the --target process when none is selected.
+            cur = _active_dbg(dbg, multi_state)
 
             # ── Quit ──
             if cmd in ("q", "quit", "exit"):
@@ -96,7 +109,7 @@ def dbg_cmd(
 
             # ── Session management (multi-process) ──
             elif cmd == "session":
-                _cmd_session(dbg, args_str, multi_state)
+                _cmd_session(args_str, multi_state)
 
             # ── Wait for hit from any session ──
             elif cmd in ("wait-any", "waitany"):
@@ -104,31 +117,31 @@ def dbg_cmd(
 
             # ── Break ──
             elif cmd in ("b", "break"):
-                _cmd_break(dbg, args_str)
+                _cmd_break(cur, args_str)
 
             # ── Delete breakpoint ──
             elif cmd in ("d", "delete"):
-                _cmd_delete(dbg, args_str)
+                _cmd_delete(cur, args_str)
 
             # ── List breakpoints ──
             elif cmd in ("bl", "info") and args_str.startswith("break"):
-                _cmd_list_bp(dbg)
+                _cmd_list_bp(cur)
 
             # ── Continue (wait for hit) ──
             elif cmd in ("c", "continue"):
-                last_hit = _cmd_continue(dbg, args_str)
+                last_hit = _cmd_continue(cur, args_str)
 
             # ── Registers ──
             elif cmd in ("r", "regs", "registers"):
-                _cmd_regs(dbg, last_hit)
+                _cmd_regs(cur, last_hit)
 
             # ── Examine memory ──
             elif cmd in ("x", "examine"):
-                _cmd_examine(dbg, args_str)
+                _cmd_examine(cur, args_str)
 
             # ── Disassemble ──
             elif cmd in ("dis", "disasm", "disassemble"):
-                _cmd_disasm(dbg, args_str, last_hit)
+                _cmd_disasm(cur, args_str, last_hit)
 
             # ── Backtrace ──
             elif cmd in ("bt", "backtrace"):
@@ -136,23 +149,23 @@ def dbg_cmd(
 
             # ── Print / Evaluate ──
             elif cmd in ("p", "print", "eval"):
-                _cmd_eval(dbg, args_str)
+                _cmd_eval(cur, args_str)
 
             # ── Watch ──
             elif cmd in ("w", "watch"):
-                _cmd_watch(dbg, args_str)
+                _cmd_watch(cur, args_str)
 
             # ── Set memory ──
             elif cmd == "set":
-                _cmd_set_memory(dbg, args_str)
+                _cmd_set_memory(cur, args_str)
 
             # ── Resolve symbol ──
             elif cmd == "resolve":
-                _cmd_resolve(dbg, args_str)
+                _cmd_resolve(cur, args_str)
 
             # ── Info commands ──
             elif cmd == "info":
-                _cmd_info(dbg, args_str)
+                _cmd_info(cur, args_str)
 
             else:
                 console.print(f"[yellow]Unknown command: {cmd}. Type 'help' for commands.[/yellow]")
@@ -160,8 +173,13 @@ def dbg_cmd(
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
     finally:
+        mgr = multi_state.get("mgr")
+        if mgr is not None:
+            mgr.disconnect_all()
         dbg.disconnect()
+
         console.print("[dim]Detached.[/dim]")
+
 
 
 # ── Command Implementations ───────────────────────────────────
@@ -198,9 +216,18 @@ def _show_help() -> None:
 [bold]Evaluate:[/bold]
   p <js_expression>     Evaluate JS in target process
 
+[bold]Multi-process:[/bold]
+  session create <n> --target <proc> [--spawn]
+                        Attach an extra process as a named session
+  session list          List sessions (* = active)
+  session switch <n>    Route all commands to that session ('-' = --target process)
+  session remove <n>    Detach and drop a session
+  wait-any [timeout]    Wait for a breakpoint hit from any session
+
 [bold]Other:[/bold]
   help                  Show this help
   q / quit              Detach and exit"""
+
     console.print(Panel(help_text, title="Commands"))
 
 
@@ -451,9 +478,27 @@ def _cmd_info(dbg, args_str: str) -> None:
 
 # ── Multi-Session Commands ────────────────────────────────────
 
-def _cmd_session(dbg_or_mgr, args_str: str, state: dict) -> None:
+def _active_dbg(default_dbg, state: dict):
+    """The session that commands operate on.
+
+    ``session switch`` only records a name; without resolving it here every
+    command would keep talking to the ``--target`` process, so switching looked
+    like it worked and silently did nothing.
+    """
+    name = state.get("active_session")
+    mgr = state.get("mgr")
+    if not name or mgr is None:
+        return default_dbg
+    try:
+        return mgr.session(name)
+    except KeyError:
+        state["active_session"] = None
+        console.print(f"[yellow]Session '{name}' is gone; using the --target process.[/yellow]")
+        return default_dbg
+
+
+def _cmd_session(args_str: str, state: dict) -> None:
     """Handle session management commands for multi-process debugging."""
-    from fridapilot.models.schemas import DeviceType
     from fridapilot.tools.debugger import DebugSessionManager
 
     mgr = state.get("mgr")
@@ -494,7 +539,9 @@ def _cmd_session(dbg_or_mgr, args_str: str, state: dict) -> None:
         if not sessions:
             console.print("  No active sessions.")
             return
+        active = state.get("active_session")
         table = Table(title="Debug Sessions")
+        table.add_column("", style="bold green")
         table.add_column("Name", style="cyan")
         table.add_column("Target")
         table.add_column("PID", justify="right")
@@ -502,15 +549,23 @@ def _cmd_session(dbg_or_mgr, args_str: str, state: dict) -> None:
         table.add_column("BPs", justify="right")
         table.add_column("Connected")
         for s in sessions:
-            table.add_row(s["name"], str(s["target"]), str(s["pid"]), s["arch"],
+            table.add_row("*" if s["name"] == active else "",
+                          s["name"], str(s["target"]), str(s["pid"]), s["arch"],
                           str(s["breakpoints"]), "[green]Yes[/green]" if s["connected"] else "[red]No[/red]")
         console.print(table)
 
     elif subcmd == "switch":
-        if not mgr or not rest.strip():
-            console.print("[red]Usage: session switch <name>[/red]")
-            return
         name = rest.strip()
+        if not name:
+            console.print("[red]Usage: session switch <name> | session switch - (back to --target)[/red]")
+            return
+        if name == "-":
+            state["active_session"] = None
+            console.print("  Switched back to the --target process.")
+            return
+        if not mgr:
+            console.print("[red]No sessions. Use: session create <name> --target <proc>[/red]")
+            return
         try:
             sess = mgr.session(name)
             state["active_session"] = name
@@ -530,7 +585,8 @@ def _cmd_session(dbg_or_mgr, args_str: str, state: dict) -> None:
 
     else:
         console.print("[yellow]session create <name> --target <proc> [--spawn][/yellow]")
-        console.print("[yellow]session list | session switch <name> | session remove <name>[/yellow]")
+        console.print("[yellow]session list | session switch <name>|- | session remove <name>[/yellow]")
+
 
 
 def _cmd_wait_any(state: dict, args_str: str):
