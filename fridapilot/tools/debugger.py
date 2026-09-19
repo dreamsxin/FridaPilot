@@ -534,3 +534,133 @@ class DebugSession:
                 return resolved
             raise ValueError(f"Cannot resolve symbol: {address}")
         return address
+
+
+# ── Multi-Process Session Manager ─────────────────────────────
+
+
+class DebugSessionManager:
+    """Manage multiple concurrent DebugSessions for multi-process targets.
+
+    Use case: Electron + Go IPC + native DLL — each process needs its own
+    debug session, but they share breakpoint hit events and cross-process
+    IPC message correlation.
+
+    Usage:
+        mgr = DebugSessionManager()
+        mgr.create("electron", "YourApp.exe")
+        mgr.create("ipc-server", "ipc-server.exe")
+        mgr.connect_all()
+        mgr.session("electron").add_breakpoint("kernel32.dll!CreateFileW")
+        mgr.session("ipc-server").add_breakpoint("ws2_32.dll!connect")
+        # Wait for hits from any session
+        name, hit = mgr.wait_any(timeout=30)
+    """
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, DebugSession] = {}
+        self._hit_callbacks: list[Callable[[str, BreakpointHit], None]] = []
+
+    def create(
+        self,
+        name: str,
+        target: str | int,
+        device_type: DeviceType = DeviceType.LOCAL,
+        host: str = "",
+        spawn: bool = False,
+    ) -> DebugSession:
+        """Create a named debug session.
+
+        Args:
+            name: Human-readable name for this session (e.g., "main", "ipc-server").
+            target: Process name or PID.
+            device_type: Device type.
+            host: Remote host.
+            spawn: Whether to spawn the process.
+
+        Returns:
+            The created DebugSession.
+        """
+        if name in self._sessions:
+            raise ValueError(f"Session '{name}' already exists. Use remove() first.")
+        session = DebugSession(target, device_type, host, spawn=spawn)
+        # Wire up cross-session hit notification
+        session._on_hit_callbacks.append(
+            lambda hit, n=name: self._on_session_hit(n, hit)
+        )
+        self._sessions[name] = session
+        return session
+
+    def session(self, name: str) -> DebugSession:
+        """Get a session by name."""
+        if name not in self._sessions:
+            raise KeyError(f"Session '{name}' not found. Active: {list(self._sessions.keys())}")
+        return self._sessions[name]
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """List all active sessions with their status."""
+        result = []
+        for name, sess in self._sessions.items():
+            result.append({
+                "name": name,
+                "target": sess.target,
+                "pid": sess.pid,
+                "arch": sess.arch,
+                "connected": sess.session is not None,
+                "breakpoints": len(sess.breakpoints),
+            })
+        return result
+
+    def connect_all(self) -> dict[str, bool]:
+        """Connect all sessions. Returns {name: success} map."""
+        results = {}
+        for name, sess in self._sessions.items():
+            try:
+                sess.connect()
+                results[name] = True
+            except Exception as e:
+                results[name] = False
+        return results
+
+    def disconnect_all(self) -> None:
+        """Disconnect all sessions."""
+        for sess in self._sessions.values():
+            try:
+                sess.disconnect()
+            except Exception:
+                pass
+
+    def remove(self, name: str) -> None:
+        """Remove and disconnect a session."""
+        if name in self._sessions:
+            try:
+                self._sessions[name].disconnect()
+            except Exception:
+                pass
+            del self._sessions[name]
+
+    def wait_any(self, timeout: float = 0) -> tuple[str, BreakpointHit] | None:
+        """Wait for a breakpoint hit from ANY session.
+
+        Args:
+            timeout: Seconds to wait (0 = forever).
+
+        Returns:
+            Tuple of (session_name, BreakpointHit) or None on timeout.
+        """
+        import time as _time
+
+        deadline = _time.time() + timeout if timeout > 0 else float("inf")
+        while _time.time() < deadline:
+            for name, sess in self._sessions.items():
+                with sess._hit_lock:
+                    if sess._hit_queue:
+                        hit = sess._hit_queue.pop(0)
+                        return (name, hit)
+            _time.sleep(0.1)
+        return None
+
+    def _on_session_hit(self, session_name: str, hit: BreakpointHit) -> None:
+        """Called when any session gets a breakpoint hit."""
+        for cb in self._hit_callbacks:
+            cb(session_name, hit)

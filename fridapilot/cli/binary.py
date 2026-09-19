@@ -766,3 +766,75 @@ def xrefs_rva_cmd(
         console.print("[dim]  Tip: 0 hits for a string that is clearly used? It may be "
                       "in a const char* table — retry with --kinds ptr over .rdata.[/dim]")
 
+
+@binary_app.command("analyze-macho")
+def analyze_macho_cmd(
+    binary: str = typer.Argument(..., help="Path to Mach-O binary."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Analyze a Mach-O binary: header, segments, load commands, FairPlay encryption, dylibs."""
+    import json as json_mod
+    from fridapilot.tools.binary_analysis import analyze_macho
+
+    result = analyze_macho(binary)
+
+    if json_output:
+        out = {
+            "filepath": result.filepath,
+            "is_fat": result.is_fat,
+            "architectures": result.architectures,
+            "cpu_type": result.cpu_type,
+            "is_64bit": result.is_64bit,
+            "encrypted": result.encrypted,
+            "cryptid": result.cryptid,
+            "min_os": result.min_os,
+            "segments": [{"name": s.name, "vmaddr": s.vmaddr, "vmsize": s.vmsize,
+                          "fileoff": s.fileoff, "filesize": s.filesize,
+                          "sections": s.sections} for s in result.segments],
+            "dylibs": result.dylibs,
+            "load_commands_count": len(result.load_commands),
+        }
+        console.print(json_mod.dumps(out, indent=2, default=str))
+        return
+
+    console.print(Panel(f"[bold]{result.filepath}[/bold]", title="Mach-O Analysis"))
+
+    info = Table(show_header=False)
+    info.add_row("CPU", result.cpu_type)
+    info.add_row("64-bit", "Yes" if result.is_64bit else "No")
+    info.add_row("Fat Binary", "Yes" if result.is_fat else "No")
+    if result.is_fat:
+        info.add_row("Architectures", ", ".join(result.architectures))
+    enc_color = "red" if result.encrypted else "green"
+    info.add_row("Encrypted", f"[{enc_color}]{'Yes (cryptid=' + str(result.cryptid) + ')' if result.encrypted else 'No'}[/{enc_color}]")
+    if result.min_os:
+        info.add_row("Min OS", result.min_os)
+    info.add_row("Load Commands", str(len(result.load_commands)))
+    console.print(info)
+
+    if result.segments:
+        seg_table = Table(title="Segments")
+        seg_table.add_column("Name")
+        seg_table.add_column("VMAddr", justify="right")
+        seg_table.add_column("VMSize", justify="right")
+        seg_table.add_column("FileOff", justify="right")
+        seg_table.add_column("Sections")
+        for s in result.segments:
+            secs = ", ".join(sec["name"] for sec in s.sections[:5])
+            if len(s.sections) > 5:
+                secs += f" +{len(s.sections) - 5}"
+            seg_table.add_row(s.name, f"0x{s.vmaddr:x}", f"0x{s.vmsize:x}",
+                              f"0x{s.fileoff:x}", secs)
+        console.print(seg_table)
+
+    if result.dylibs:
+        console.print(f"\n[bold]Dynamic Libraries:[/bold] ({len(result.dylibs)})")
+        for lib in result.dylibs[:20]:
+            console.print(f"  {lib}")
+        if len(result.dylibs) > 20:
+            console.print(f"  ... and {len(result.dylibs) - 20} more")
+
+    if result.encrypted:
+        console.print("\n[bold yellow]FairPlay DRM detected![/bold yellow] Use frida-ios-dump to decrypt:")
+        console.print("  frida-ios-dump -H <device_ip> -p 22 \"App Name\"")
+

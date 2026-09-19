@@ -69,6 +69,7 @@ def dbg_cmd(
         raise typer.Exit(1)
 
     last_hit = None  # Most recent BreakpointHit
+    multi_state = {"mgr": None, "active_session": None}  # Multi-session state
 
     # ── REPL Loop ─────────────────────────────────────────
     try:
@@ -92,6 +93,14 @@ def dbg_cmd(
             # ── Help ──
             elif cmd == "help":
                 _show_help()
+
+            # ── Session management (multi-process) ──
+            elif cmd == "session":
+                _cmd_session(dbg, args_str, multi_state)
+
+            # ── Wait for hit from any session ──
+            elif cmd in ("wait-any", "waitany"):
+                last_hit = _cmd_wait_any(multi_state, args_str)
 
             # ── Break ──
             elif cmd in ("b", "break"):
@@ -438,3 +447,115 @@ def _cmd_info(dbg, args_str: str) -> None:
 
     else:
         console.print("[yellow]info modules | info exports <mod> | info threads | info break[/yellow]")
+
+
+# ── Multi-Session Commands ────────────────────────────────────
+
+def _cmd_session(dbg_or_mgr, args_str: str, state: dict) -> None:
+    """Handle session management commands for multi-process debugging."""
+    from fridapilot.models.schemas import DeviceType
+    from fridapilot.tools.debugger import DebugSessionManager
+
+    mgr = state.get("mgr")
+    parts = args_str.strip().split(None, 1)
+    subcmd = parts[0] if parts else ""
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if subcmd == "create":
+        # session create <name> --target <proc> [--spawn]
+        if not mgr:
+            mgr = DebugSessionManager()
+            state["mgr"] = mgr
+        tokens = rest.split()
+        if len(tokens) < 3 or "--target" not in tokens:
+            console.print("[red]Usage: session create <name> --target <proc> [--spawn][/red]")
+            return
+        name = tokens[0]
+        target_idx = tokens.index("--target") + 1
+        target = tokens[target_idx] if target_idx < len(tokens) else ""
+        spawn = "--spawn" in tokens
+        try:
+            tgt: str | int
+            try:
+                tgt = int(target)
+            except ValueError:
+                tgt = target
+            sess = mgr.create(name, tgt, spawn=spawn)
+            sess.connect()
+            console.print(f"  [green]Session '{name}' created[/green]: PID={sess.pid} Arch={sess.arch}")
+        except Exception as e:
+            console.print(f"  [red]Failed: {e}[/red]")
+
+    elif subcmd == "list":
+        if not mgr:
+            console.print("  No sessions. Use: session create <name> --target <proc>")
+            return
+        sessions = mgr.list_sessions()
+        if not sessions:
+            console.print("  No active sessions.")
+            return
+        table = Table(title="Debug Sessions")
+        table.add_column("Name", style="cyan")
+        table.add_column("Target")
+        table.add_column("PID", justify="right")
+        table.add_column("Arch")
+        table.add_column("BPs", justify="right")
+        table.add_column("Connected")
+        for s in sessions:
+            table.add_row(s["name"], str(s["target"]), str(s["pid"]), s["arch"],
+                          str(s["breakpoints"]), "[green]Yes[/green]" if s["connected"] else "[red]No[/red]")
+        console.print(table)
+
+    elif subcmd == "switch":
+        if not mgr or not rest.strip():
+            console.print("[red]Usage: session switch <name>[/red]")
+            return
+        name = rest.strip()
+        try:
+            sess = mgr.session(name)
+            state["active_session"] = name
+            console.print(f"  Switched to session '{name}' (PID={sess.pid})")
+        except KeyError as e:
+            console.print(f"  [red]{e}[/red]")
+
+    elif subcmd == "remove":
+        if not mgr or not rest.strip():
+            console.print("[red]Usage: session remove <name>[/red]")
+            return
+        name = rest.strip()
+        mgr.remove(name)
+        if state.get("active_session") == name:
+            state["active_session"] = None
+        console.print(f"  Session '{name}' removed.")
+
+    else:
+        console.print("[yellow]session create <name> --target <proc> [--spawn][/yellow]")
+        console.print("[yellow]session list | session switch <name> | session remove <name>[/yellow]")
+
+
+def _cmd_wait_any(state: dict, args_str: str):
+    """Wait for a breakpoint hit from any session."""
+    mgr = state.get("mgr")
+    if not mgr:
+        console.print("[yellow]No multi-session manager. Use 'session create' first.[/yellow]")
+        return None
+
+    timeout = float(args_str.strip()) if args_str.strip() else 0
+    console.print("[dim]Waiting for hit from any session... (Ctrl+C to cancel)[/dim]")
+    try:
+        result = mgr.wait_any(timeout=timeout)
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted[/yellow]")
+        return None
+
+    if result:
+        name, hit = result
+        console.print(f"  [bold red]Hit[/bold red] in session [cyan]{name}[/cyan] "
+                      f"BP#{hit.bp_id} at {hit.address} thread={hit.thread_id}")
+        if hit.disassembly:
+            for line in hit.disassembly[:5]:
+                console.print(f"    {line}")
+        return hit
+    else:
+        console.print("[yellow]Timeout[/yellow]")
+        return None

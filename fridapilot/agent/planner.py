@@ -177,6 +177,26 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 - binary_analysis.analyze_go_binary(path) -> Go binary: version, packages, functions, source paths
   Pro tip: Source paths reveal internal architecture (e.g., "internal/pkg/ipc/npipe_windows.go" -> Named Pipe IPC)
 
+### PE RVA-Aware Analysis (ImageBase-correct, for large DLLs like chrome.dll)
+- pe_rva.find_string_rvas(path, needles, encoding) -> Find exact strings and their RVA/file offset
+- pe_rva.xrefs_to_rva(path, target_rva, start, end) -> Cross-references to a RVA (correct across sections)
+- pe_rva.field_refs(path, offset, kind, start, end) -> Find struct field read/write at a given offset (e.g., offset=0xB0)
+- pe_rva.map_refs_to_functions(path, strings, start, end) -> Map multiple strings to their consuming functions in one pass
+- pe_rva.disassemble_rva(path, rva, count) -> RVA-aware disassembly with symbol annotations
+- pe_rva.function_bounds(path, rva) -> Find function start/end boundaries from .pdata
+
+### macOS/iOS Analysis (requires LLDB/otool on macOS)
+- lldb.analyze_binary(path) -> Mach-O sections, symbols via LLDB batch mode
+- lldb.get_macho_info(path) -> Architecture, load commands, FairPlay encryption status (cryptid)
+- lldb.check_codesign(path) -> Code signing validation + entitlements extraction
+- lldb.dump_objc_classes(path) -> ObjC class names from Mach-O (class-dump or strings fallback)
+
+### Unpacking (packed/protected binaries)
+- unpacker.detect_packer(path) -> Detect packer type (UPX/VMProtect/Themida/ASPack/unknown)
+- unpacker.unpack_upx(path) -> Auto-unpack UPX-packed binaries
+- unpacker.dump_process_memory(target, device) -> Runtime memory dump via Frida (for non-UPX packers)
+- unpacker.auto_unpack(path) -> Full pipeline: detect → try UPX → try dump → report
+
 ## Planning Strategy
 
 When planning, follow this decision tree:

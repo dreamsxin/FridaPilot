@@ -42,6 +42,7 @@ from fridapilot.cli.bypass import bypass_app
 from fridapilot.cli.report import report_cmd
 from fridapilot.cli.crypto import crypto_app
 from fridapilot.cli.binary import binary_app
+from fridapilot.cli.unpack import unpack_app
 from fridapilot.cli.dbg import dbg_cmd
 from fridapilot.cli.run import run_cmd
 
@@ -56,7 +57,8 @@ app.command("observe")(observe_cmd)
 app.add_typer(bypass_app, name="bypass", help="SSL pinning, anti-debug, anti-Frida bypasses.")
 app.command("report")(report_cmd)
 app.add_typer(crypto_app, name="crypto", help="Binary crypto analysis, key extraction, BCrypt hooking.")
-app.add_typer(binary_app, name="binary", help="Static binary analysis: PE/ELF, disassembly, strings, Go analysis.")
+app.add_typer(binary_app, name="binary", help="Static binary analysis: PE/ELF/Mach-O, disassembly, strings, Go analysis.")
+app.add_typer(unpack_app, name="unpack", help="Packer detection, auto-unpacking, memory dump.")
 app.command("dbg")(dbg_cmd)
 app.command("run")(run_cmd)
 

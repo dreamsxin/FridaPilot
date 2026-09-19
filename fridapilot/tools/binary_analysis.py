@@ -546,3 +546,165 @@ def analyze_go_binary(filepath: str | Path) -> GoAnalysis:
     result.strings_sample = sorted(seen_strings)[:100]
 
     return result
+
+
+# ── Mach-O Analysis ───────────────────────────────────────────
+
+# Mach-O magic numbers
+_MH_MAGIC_64 = 0xFEEDFACF
+_MH_MAGIC = 0xFEEDFACE
+_FAT_MAGIC = 0xCAFEBABE
+_FAT_MAGIC_64 = 0xCAFEBABF
+
+_LC_NAMES = {
+    0x1: "LC_SEGMENT", 0x19: "LC_SEGMENT_64",
+    0x2: "LC_SYMTAB", 0xB: "LC_DYSYMTAB",
+    0xC: "LC_LOAD_DYLIB", 0xD: "LC_ID_DYLIB",
+    0xE: "LC_LOAD_DYLINKER", 0x21: "LC_ENCRYPTION_INFO",
+    0x2C: "LC_ENCRYPTION_INFO_64",
+    0x22: "LC_DYLD_INFO", 0x80000022: "LC_DYLD_INFO_ONLY",
+    0x26: "LC_FUNCTION_STARTS", 0x28: "LC_MAIN",
+    0x32: "LC_BUILD_VERSION", 0x24: "LC_VERSION_MIN_MACOSX",
+    0x25: "LC_VERSION_MIN_IPHONEOS",
+    0x1D: "LC_CODE_SIGNATURE", 0x27: "LC_DATA_IN_CODE",
+}
+
+_CPU_TYPES = {
+    7: "x86", 0x01000007: "x86_64",
+    12: "ARM", 0x0100000C: "ARM64",
+}
+
+
+@dataclass
+class MachOSegment:
+    """A Mach-O segment."""
+    name: str
+    vmaddr: int = 0
+    vmsize: int = 0
+    fileoff: int = 0
+    filesize: int = 0
+    sections: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class MachOAnalysis:
+    """Result of Mach-O binary analysis."""
+    filepath: str
+    is_fat: bool = False
+    architectures: list[str] = field(default_factory=list)
+    cpu_type: str = ""
+    is_64bit: bool = False
+    encrypted: bool = False
+    cryptid: int = 0
+    segments: list[MachOSegment] = field(default_factory=list)
+    load_commands: list[dict] = field(default_factory=list)
+    dylibs: list[str] = field(default_factory=list)
+    min_os: str = ""
+
+
+def analyze_macho(filepath: str | Path) -> MachOAnalysis:
+    """Analyze a Mach-O binary: header, segments, load commands, encryption, dylibs.
+
+    Pure Python parser — no external dependencies.
+
+    Args:
+        filepath: Path to the Mach-O binary.
+
+    Returns:
+        MachOAnalysis with all extracted metadata.
+    """
+    filepath = Path(filepath)
+    data = filepath.read_bytes()
+    result = MachOAnalysis(filepath=str(filepath))
+
+    if len(data) < 4:
+        return result
+
+    magic = struct.unpack_from("<I", data, 0)[0]
+
+    # Fat binary detection
+    magic_be = struct.unpack_from(">I", data, 0)[0]
+    if magic_be in (_FAT_MAGIC, _FAT_MAGIC_64):
+        result.is_fat = True
+        nfat = struct.unpack_from(">I", data, 4)[0]
+        for i in range(min(nfat, 10)):
+            off = 8 + i * 20
+            cpu = struct.unpack_from(">I", data, off)[0]
+            result.architectures.append(_CPU_TYPES.get(cpu, f"0x{cpu:x}"))
+        if nfat > 0:
+            slice_off = struct.unpack_from(">I", data, 8 + 8)[0]
+            data = data[slice_off:]
+            magic = struct.unpack_from("<I", data, 0)[0]
+
+    if magic == _MH_MAGIC_64:
+        result.is_64bit = True
+        hdr_size = 32
+    elif magic == _MH_MAGIC:
+        result.is_64bit = False
+        hdr_size = 28
+    else:
+        return result
+
+    cpu = struct.unpack_from("<I", data, 4)[0]
+    result.cpu_type = _CPU_TYPES.get(cpu, f"0x{cpu:x}")
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+
+    offset = hdr_size
+    for _ in range(min(ncmds, 200)):
+        if offset + 8 > len(data):
+            break
+        cmd_type = struct.unpack_from("<I", data, offset)[0]
+        cmd_size = struct.unpack_from("<I", data, offset + 4)[0]
+        if cmd_size < 8:
+            break
+
+        cmd_name = _LC_NAMES.get(cmd_type, f"0x{cmd_type:x}")
+        lc: dict[str, Any] = {"cmd": cmd_name, "offset": offset, "size": cmd_size}
+
+        if cmd_type in (0x1, 0x19):
+            is_64 = cmd_type == 0x19
+            segname = data[offset + 8:offset + 24].rstrip(b"\x00").decode("ascii", errors="replace")
+            if is_64:
+                vmaddr, vmsize, fileoff, filesize = struct.unpack_from("<QQQQ", data, offset + 24)
+                nsects = struct.unpack_from("<I", data, offset + 64)[0]
+                sec_off = offset + 72
+                sec_sz = 80
+            else:
+                vmaddr, vmsize, fileoff, filesize = struct.unpack_from("<IIII", data, offset + 24)
+                nsects = struct.unpack_from("<I", data, offset + 48)[0]
+                sec_off = offset + 56
+                sec_sz = 68
+
+            seg = MachOSegment(name=segname, vmaddr=vmaddr, vmsize=vmsize,
+                               fileoff=fileoff, filesize=filesize)
+            for s in range(min(nsects, 50)):
+                soff = sec_off + s * sec_sz
+                if soff + 32 > len(data):
+                    break
+                secname = data[soff:soff + 16].rstrip(b"\x00").decode("ascii", errors="replace")
+                seg.sections.append({"name": secname})
+            result.segments.append(seg)
+            lc["segment"] = segname
+
+        elif cmd_type in (0x21, 0x2C):
+            cryptid = struct.unpack_from("<I", data, offset + 16)[0]
+            result.cryptid = cryptid
+            result.encrypted = cryptid != 0
+            lc["cryptid"] = cryptid
+
+        elif cmd_type == 0xC:
+            name_off = struct.unpack_from("<I", data, offset + 8)[0]
+            dylib_name = data[offset + name_off:offset + cmd_size].split(b"\x00")[0].decode("utf-8", errors="replace")
+            result.dylibs.append(dylib_name)
+            lc["dylib"] = dylib_name
+
+        elif cmd_type in (0x24, 0x25, 0x32):
+            ver_off = 12 if cmd_type == 0x32 else 8
+            ver = struct.unpack_from("<I", data, offset + ver_off)[0]
+            major, minor, patch = (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF
+            result.min_os = f"{major}.{minor}.{patch}"
+
+        result.load_commands.append(lc)
+        offset += cmd_size
+
+    return result

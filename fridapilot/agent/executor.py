@@ -44,6 +44,12 @@ def _register_tools() -> None:
 
     from fridapilot.tools import recon, injector, observer, script_forge, bypass, crypto_reverse
     from fridapilot.tools import binary_analysis
+    from fridapilot.tools import pe_rva
+    from fridapilot.tools import unpacker as unpacker_mod
+    from fridapilot.tools import apk_analysis
+    from fridapilot.tools.lldb_bridge import LLDBBridge
+
+    _lldb = LLDBBridge()
 
     TOOL_REGISTRY.update({
         "recon.list_processes": recon.list_processes,
@@ -70,6 +76,29 @@ def _register_tools() -> None:
         "binary_analysis.search_bytes": binary_analysis.search_bytes,
         "binary_analysis.xrefs_to": binary_analysis.xrefs_to,
         "binary_analysis.analyze_go_binary": binary_analysis.analyze_go_binary,
+        # PE RVA-aware analysis tools
+        "pe_rva.find_string_rvas": pe_rva.find_string_rvas,
+        "pe_rva.xrefs_to_rva": pe_rva.xrefs_to_rva,
+        "pe_rva.field_refs": pe_rva.field_refs,
+        "pe_rva.map_refs_to_functions": pe_rva.map_refs_to_functions,
+        "pe_rva.disassemble_rva": pe_rva.disassemble_rva,
+        "pe_rva.function_bounds": pe_rva.function_bounds,
+        # LLDB / macOS tools (graceful no-op if lldb not in PATH)
+        "lldb.analyze_binary": _lldb.analyze_binary,
+        "lldb.get_macho_info": _lldb.get_macho_info,
+        "lldb.check_codesign": _lldb.check_codesign,
+        "lldb.dump_objc_classes": _lldb.dump_objc_classes,
+        # Mach-O native analysis (no lldb needed)
+        "binary_analysis.analyze_macho": binary_analysis.analyze_macho,
+        # Unpacker tools
+        "unpacker.detect_packer": unpacker_mod.detect_packer,
+        "unpacker.unpack_upx": unpacker_mod.unpack_upx,
+        "unpacker.dump_process_memory": unpacker_mod.dump_process_memory,
+        "unpacker.auto_unpack": unpacker_mod.auto_unpack,
+        # APK/DEX analysis
+        "apk_analysis.analyze_apk": apk_analysis.analyze_apk,
+        "apk_analysis.analyze_dex": apk_analysis.analyze_dex,
+        "apk_analysis.detect_protections": apk_analysis.detect_protections,
     })
 
 
