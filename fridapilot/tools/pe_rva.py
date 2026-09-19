@@ -538,9 +538,14 @@ def _iter_rip_refs(
                     yield (scan_start_rva + i - 2, end_rva + imm + disp,
                            "(unverified)", "[rip%+d]" % disp, 0)
                     break
-                for back in range(2, 9):
+                # Walk back from the longest possible encoding: prefixes sit ahead
+                # of the opcode, so the outermost start that still ends at this
+                # displacement is the real instruction. Taking the innermost would
+                # report the REX-less alias (``8B 05`` inside ``48 8B 05``), which
+                # resolves to the same target but is not a real reference site.
+                for back in range(8, 1, -1):
                     if i - back < 0:
-                        break
+                        continue
                     insn = next(iter(md.disasm(data[i - back:i - back + 16],
                                               base + scan_start_rva + i - back)), None)
                     if insn is None or insn.size < back + 4:
@@ -551,6 +556,7 @@ def _iter_rip_refs(
                                insn.mnemonic, insn.op_str, insn.size)
                         break
                 break
+
 
 
 def map_refs_to_functions(
