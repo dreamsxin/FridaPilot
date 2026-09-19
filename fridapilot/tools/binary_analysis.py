@@ -12,7 +12,9 @@ from __future__ import annotations
 import math
 import re
 import struct
+from dataclasses import dataclass, field
 from pathlib import Path
+
 from typing import Any
 
 from fridapilot.models.schemas import (
