@@ -12,8 +12,10 @@ No LLM dependency.
 
 from __future__ import annotations
 
+import re
 import struct
 import zipfile
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -93,11 +95,16 @@ def analyze_apk(filepath: str | Path) -> APKAnalysis:
             manifest_data = zf.read("AndroidManifest.xml")
             _parse_binary_manifest(manifest_data, result)
 
-        # Parse first DEX for strings (protection detection)
-        if dex_files:
-            dex_data = zf.read(dex_files[0])
-            dex = _parse_dex_header(dex_data)
-            _detect_protections(dex.strings_sample, result)
+        # Parse DEX files for strings (protection detection). Scanning only the
+        # first DEX misses everything in a multi-dex app, which is most of them.
+        all_strings: list[str] = []
+        for name in dex_files:
+            _dex, strings = _parse_dex_header(zf.read(name))
+            all_strings.extend(strings)
+
+        if all_strings:
+            _detect_protections(all_strings, result)
+
 
         # Check signing
         cert_files = [n for n in names if n.startswith("META-INF/") and
@@ -113,101 +120,203 @@ def analyze_apk(filepath: str | Path) -> APKAnalysis:
 
 
 def _parse_binary_manifest(data: bytes, result: APKAnalysis) -> None:
-    """Extract info from Android binary XML manifest using string table extraction."""
-    # Binary XML is complex; extract strings from the string table as a pragmatic approach
-    strings = _extract_binary_xml_strings(data)
+    """Fill package/version/sdk/components from the binary AndroidManifest.xml.
 
-    for s in strings:
-        if s.startswith("android.permission."):
-            result.permissions.append(s)
-        elif "Activity" in s and "." in s and not s.startswith("android."):
-            result.activities.append(s)
-        elif "Service" in s and "." in s and not s.startswith("android."):
-            result.services.append(s)
-        elif "Receiver" in s and "." in s and not s.startswith("android."):
-            result.receivers.append(s)
-        elif "Provider" in s and "." in s and not s.startswith("android."):
-            result.providers.append(s)
+    Reads the actual element and attribute records. The previous approach —
+    classifying raw string-pool entries by substring ("Activity" in s) and taking
+    the first string with two dots as the package name — cannot distinguish an
+    attribute value from a resource name, so it reported library classes as the
+    package and left versionName/versionCode/minSdk/targetSdk permanently empty.
+    """
+    elements = list(_iter_axml_elements(data))
 
-    # Try to extract package name (usually first non-android string with dots)
-    for s in strings:
-        if "." in s and not s.startswith("android.") and not s.startswith("http") \
-           and not s.endswith(".xml") and s.count(".") >= 2 and len(s) < 100:
-            result.package_name = s
-            break
+    pkg = ""
+    for tag, attrs in elements:
+        if tag == "manifest":
+            pkg = str(attrs.get("package", "") or "")
+            result.package_name = pkg
+            result.version_name = str(attrs.get("versionName", "") or "")
+            result.version_code = _as_int(attrs.get("versionCode"))
+        elif tag == "uses-sdk":
+            result.min_sdk = _as_int(attrs.get("minSdkVersion"))
+            result.target_sdk = _as_int(attrs.get("targetSdkVersion"))
+        elif tag == "uses-permission":
+            name = str(attrs.get("name", "") or "")
+            if name:
+                result.permissions.append(name)
+        elif tag in ("activity", "activity-alias", "service", "receiver", "provider"):
+            name = _qualify(pkg, str(attrs.get("name", "") or ""))
+            if not name:
+                continue
+            {"activity": result.activities, "activity-alias": result.activities,
+             "service": result.services, "receiver": result.receivers,
+             "provider": result.providers}[tag].append(name)
+
+    if not elements:
+        # Unparsable / non-standard AXML: recover permissions only, by exact prefix.
+        for s in _parse_axml_string_pool(data):
+            if s.startswith("android.permission."):
+                result.permissions.append(s)
 
 
-def _extract_binary_xml_strings(data: bytes) -> list[str]:
-    """Extract string table from Android binary XML format."""
-    strings: list[str] = []
-    if len(data) < 16:
-        return strings
+def _qualify(package: str, name: str) -> str:
+    """Expand a relative component name (".MainActivity") against the package."""
+    if not name:
+        return ""
+    if name.startswith("."):
+        return package + name if package else name
+    if "." not in name and package:
+        return "%s.%s" % (package, name)
+    return name
 
-    # Binary XML header: magic (0x00080003), file_size, string_pool_offset...
-    # String pool starts after the header, with count at offset 8 of the pool
-    try:
-        # Find string pool chunk (type 0x0001)
-        offset = 8  # Skip file header
-        while offset + 8 < len(data):
+
+def _as_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            return 0
+    return 0
+
+
+# Android binary XML (AXML) chunk types, from ResourceTypes.h
+_CHUNK_STRING_POOL = 0x0001
+_CHUNK_START_ELEMENT = 0x0102
+
+
+def _parse_axml_string_pool(data: bytes) -> list[str]:
+    """Return the AXML string pool as an index-addressable list ([] on failure)."""
+    offset = 8  # skip the file header
+    while offset + 8 <= len(data):
+        try:
             chunk_type = struct.unpack_from("<H", data, offset)[0]
             chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
-            if chunk_size < 8:
-                break
+        except struct.error:
+            return []
+        if chunk_size < 8:
+            return []
+        if chunk_type == _CHUNK_STRING_POOL:
+            return _read_string_pool(data, offset)
+        offset += chunk_size
+    return []
 
-            if chunk_type == 0x0001:  # String pool
-                str_count = struct.unpack_from("<I", data, offset + 8)[0]
-                flags = struct.unpack_from("<I", data, offset + 16)[0]
-                is_utf8 = (flags & (1 << 8)) != 0
-                str_start = struct.unpack_from("<I", data, offset + 20)[0]
 
-                offsets_start = offset + 28
-                data_start = offset + str_start
+def _read_string_pool(data: bytes, offset: int) -> list[str]:
+    """Decode a ResStringPool chunk at ``offset`` into a list of strings."""
+    strings: list[str] = []
+    try:
+        count = struct.unpack_from("<I", data, offset + 8)[0]
+        flags = struct.unpack_from("<I", data, offset + 16)[0]
+        strings_start = struct.unpack_from("<I", data, offset + 20)[0]
+    except struct.error:
+        return strings
+    is_utf8 = (flags & (1 << 8)) != 0
+    offsets_at = offset + 28
+    data_at = offset + strings_start
 
-                for i in range(min(str_count, 2000)):
-                    str_off = struct.unpack_from("<I", data, offsets_start + i * 4)[0]
-                    abs_off = data_start + str_off
-
-                    if abs_off >= len(data):
-                        continue
-
-                    if is_utf8:
-                        # UTF-8: skip char count (1-2 bytes), then byte count (1-2 bytes)
-                        pos = abs_off
-                        if pos < len(data):
-                            b = data[pos]
-                            pos += 2 if b & 0x80 else 1
-                        if pos < len(data):
-                            b = data[pos]
-                            byte_len = ((b & 0x7F) << 8 | data[pos + 1]) if b & 0x80 else b
-                            pos += 2 if b & 0x80 else 1
-                        else:
-                            continue
-                        if pos + byte_len <= len(data):
-                            try:
-                                s = data[pos:pos + byte_len].decode("utf-8", errors="replace")
-                                if s and len(s) > 1:
-                                    strings.append(s)
-                            except Exception:
-                                pass
-                    else:
-                        # UTF-16
-                        if abs_off + 2 > len(data):
-                            continue
-                        char_len = struct.unpack_from("<H", data, abs_off)[0]
-                        str_data = data[abs_off + 2:abs_off + 2 + char_len * 2]
-                        try:
-                            s = str_data.decode("utf-16-le", errors="replace")
-                            if s and len(s) > 1:
-                                strings.append(s)
-                        except Exception:
-                            pass
-                break
-
-            offset += chunk_size
-    except Exception:
-        pass
-
+    for i in range(min(count, 20000)):
+        try:
+            rel = struct.unpack_from("<I", data, offsets_at + i * 4)[0]
+        except struct.error:
+            break
+        pos = data_at + rel
+        if pos >= len(data):
+            strings.append("")
+            continue
+        if is_utf8:
+            # two length fields: UTF-16 length, then byte length (1-2 bytes each)
+            b = data[pos]
+            pos += 2 if b & 0x80 else 1
+            if pos >= len(data):
+                strings.append("")
+                continue
+            b = data[pos]
+            if b & 0x80:
+                if pos + 1 >= len(data):
+                    strings.append("")
+                    continue
+                byte_len = ((b & 0x7F) << 8) | data[pos + 1]
+                pos += 2
+            else:
+                byte_len = b
+                pos += 1
+            strings.append(data[pos:pos + byte_len].decode("utf-8", errors="replace"))
+        else:
+            if pos + 2 > len(data):
+                strings.append("")
+                continue
+            char_len = struct.unpack_from("<H", data, pos)[0]
+            if char_len & 0x8000:  # 32-bit length escape
+                char_len = ((char_len & 0x7FFF) << 16) | struct.unpack_from("<H", data, pos + 2)[0]
+                pos += 4
+            else:
+                pos += 2
+            strings.append(data[pos:pos + char_len * 2].decode("utf-16-le", errors="replace"))
     return strings
+
+
+def _iter_axml_elements(data: bytes):
+    """Yield (tag_name, {attribute_name: value}) for each AXML START_ELEMENT.
+
+    Attribute values resolve to the raw string when present, otherwise to the typed
+    value (int / bool / "@0x..." resource reference).
+    """
+    pool: list[str] = []
+    offset = 8
+    while offset + 8 <= len(data):
+        try:
+            chunk_type = struct.unpack_from("<H", data, offset)[0]
+            header_size = struct.unpack_from("<H", data, offset + 2)[0]
+            chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
+        except struct.error:
+            return
+        if chunk_size < 8 or offset + chunk_size > len(data):
+            return
+
+        if chunk_type == _CHUNK_STRING_POOL:
+            pool = _read_string_pool(data, offset)
+        elif chunk_type == _CHUNK_START_ELEMENT and pool:
+            ext = offset + max(header_size, 16)
+            try:
+                name_idx = struct.unpack_from("<I", data, ext + 4)[0]
+                attr_start = struct.unpack_from("<H", data, ext + 8)[0]
+                attr_size = struct.unpack_from("<H", data, ext + 10)[0]
+                attr_count = struct.unpack_from("<H", data, ext + 12)[0]
+            except struct.error:
+                return
+            tag = pool[name_idx] if name_idx < len(pool) else ""
+            attrs: dict[str, Any] = {}
+            base = ext + attr_start
+            stride = attr_size or 20
+            for i in range(min(attr_count, 256)):
+                at = base + i * stride
+                if at + 20 > len(data):
+                    break
+                a_name = struct.unpack_from("<I", data, at + 4)[0]
+                raw = struct.unpack_from("<I", data, at + 8)[0]
+                dtype = data[at + 15]
+                value_int = struct.unpack_from("<I", data, at + 16)[0]
+                key = pool[a_name] if a_name < len(pool) else ""
+                if raw != 0xFFFFFFFF and raw < len(pool):
+                    value: Any = pool[raw]
+                elif dtype in (0x10, 0x11):        # INT_DEC / INT_HEX
+                    value = value_int
+                elif dtype == 0x12:                # INT_BOOLEAN
+                    value = bool(value_int)
+                elif dtype == 0x01:                # REFERENCE
+                    value = "@0x%08x" % value_int
+                else:
+                    value = value_int
+                if key:
+                    attrs[key] = value
+            yield tag, attrs
+
+        offset += chunk_size
+
 
 
 # ── DEX Analysis ──────────────────────────────────────────────
@@ -224,20 +333,25 @@ def analyze_dex(filepath: str | Path) -> DEXAnalysis:
     """
     filepath = Path(filepath)
     data = filepath.read_bytes()
-    return _parse_dex_header(data, str(filepath))
+    return _parse_dex_header(data, str(filepath))[0]
 
 
-def _parse_dex_header(data: bytes, filepath: str = "") -> DEXAnalysis:
-    """Parse DEX file header and extract metadata."""
+def _parse_dex_header(data: bytes, filepath: str = "") -> tuple[DEXAnalysis, list[str]]:
+    """Parse a DEX header. Returns (analysis, all_extracted_strings).
+
+    The full string list is returned separately from ``strings_sample`` so callers
+    can run detection over everything while the reported sample stays small.
+    """
     result = DEXAnalysis(filepath=filepath)
 
     if len(data) < 112:
-        return result
+        return result, []
 
     # DEX header
     magic = data[:8]
     if not magic[:4] == b"dex\n":
-        return result
+        return result, []
+
 
     result.magic = magic[:4].decode("ascii", errors="replace")
     result.version = magic[4:7].decode("ascii", errors="replace")
@@ -260,9 +374,11 @@ def _parse_dex_header(data: bytes, filepath: str = "") -> DEXAnalysis:
     class_defs_size = struct.unpack_from("<I", data, 96)[0]
     result.class_count = class_defs_size
 
-    # Extract strings (sample)
+    # Extract strings. The ULEB128 prefix counts UTF-16 code units, not bytes, so
+    # using it as a byte length truncates every string containing a non-ASCII
+    # character. The data is NUL-terminated MUTF-8 — read up to the terminator.
     strings: list[str] = []
-    for i in range(min(string_ids_size, 5000)):
+    for i in range(min(string_ids_size, 20000)):
         try:
             str_off_ptr = string_ids_off + i * 4
             if str_off_ptr + 4 > len(data):
@@ -270,22 +386,16 @@ def _parse_dex_header(data: bytes, filepath: str = "") -> DEXAnalysis:
             str_data_off = struct.unpack_from("<I", data, str_off_ptr)[0]
             if str_data_off >= len(data):
                 continue
-            # ULEB128 length prefix
             pos = str_data_off
-            val = 0
-            shift = 0
-            while pos < len(data):
-                b = data[pos]
-                val |= (b & 0x7F) << shift
+            while pos < len(data) and (data[pos] & 0x80):  # skip ULEB128 prefix
                 pos += 1
-                if not (b & 0x80):
-                    break
-                shift += 7
-            str_len = val
-            if pos + str_len <= len(data) and str_len > 0:
-                s = data[pos:pos + str_len].decode("utf-8", errors="replace")
-                if len(s) >= 3:
-                    strings.append(s)
+            pos += 1
+            end = data.find(b"\x00", pos, pos + 8192)
+            if end < 0:
+                continue
+            s = data[pos:end].decode("utf-8", errors="replace")
+            if len(s) >= 3:
+                strings.append(s)
         except Exception:
             continue
 
@@ -294,7 +404,8 @@ def _parse_dex_header(data: bytes, filepath: str = "") -> DEXAnalysis:
     # Extract class names from strings (Lcom/example/...)
     result.classes = [s for s in strings if s.startswith("L") and "/" in s and s.endswith(";")][:200]
 
-    return result
+    return result, strings
+
 
 
 # ── Protection Detection ──────────────────────────────────────
@@ -323,10 +434,10 @@ _PROTECTION_INDICATORS: dict[str, list[tuple[str, str]]] = {
     "frida_detection": [
         ("frida", "Frida string reference"),
         ("27042", "Frida default port"),
-        ("REJECT", "Frida detection reject"),
         ("xposed", "Xposed framework"),
         ("substrate", "Cydia Substrate"),
     ],
+
     "obfuscation": [
         ("proguard", "ProGuard obfuscation"),
         ("DexGuard", "DexGuard protection"),
@@ -345,19 +456,43 @@ _PROTECTION_INDICATORS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+_PATTERN_CACHE: dict[str, Any] = {}
+
+
+
+def _indicator_match(strings: list[str], keyword: str) -> str | None:
+    """First string containing ``keyword`` as a standalone token, else None.
+
+    Matching substrings against one concatenated blob (the previous approach) makes
+    short indicators worthless: "su" hits "issue" and "consumer", "generic" hits
+    "generic_thing", so every APK came back root- and emulator-aware. Requiring
+    non-identifier characters on both sides keeps "/system/xbin/su",
+    "Build.FINGERPRINT" and "com.topjohnwu.magisk" while dropping those.
+    """
+    pat = _PATTERN_CACHE.get(keyword)
+    if pat is None:
+        pat = re.compile(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(keyword),
+                         re.IGNORECASE)
+        _PATTERN_CACHE[keyword] = pat
+    for s in strings:
+        if pat.search(s):
+            return s
+    return None
+
 
 def _detect_protections(strings: list[str], result: APKAnalysis) -> None:
     """Detect security protections from DEX strings."""
-    all_strings_lower = " ".join(strings).lower()
-
     for category, indicators in _PROTECTION_INDICATORS.items():
         for keyword, description in indicators:
-            if keyword.lower() in all_strings_lower:
+            match = _indicator_match(strings, keyword)
+            if match is not None:
                 result.protections.append({
                     "category": category,
                     "indicator": keyword,
                     "description": description,
+                    "match": match[:160],
                 })
+
 
 
 def detect_protections(filepath: str | Path) -> list[dict[str, str]]:
