@@ -9,6 +9,15 @@ console = Console()
 apk_app = typer.Typer(no_args_is_help=True)
 
 
+def _require_file(path: str) -> None:
+    from pathlib import Path
+
+    if not Path(path).is_file():
+        console.print(f"[red]File not found: {path}[/red]")
+        raise typer.Exit(1)
+
+
+
 @apk_app.command("analyze")
 def analyze_cmd(
     apk: str = typer.Argument(..., help="Path to the .apk file."),
@@ -21,7 +30,9 @@ def analyze_cmd(
 
     from fridapilot.tools.apk_analysis import analyze_apk
 
+    _require_file(apk)
     info = analyze_apk(apk)
+
 
     if json_output:
         console.print(json_mod.dumps(asdict(info), indent=2, ensure_ascii=False))
@@ -78,7 +89,9 @@ def dex_cmd(
 
     from fridapilot.tools.apk_analysis import analyze_dex
 
+    _require_file(dex)
     info = analyze_dex(dex)
+
 
     if json_output:
         console.print(json_mod.dumps(asdict(info), indent=2, ensure_ascii=False))
@@ -110,7 +123,9 @@ def protections_cmd(
 
     from fridapilot.tools.apk_analysis import detect_protections
 
+    _require_file(apk)
     hits = detect_protections(apk)
+
 
     if json_output:
         console.print(json_mod.dumps(hits, indent=2, ensure_ascii=False))
