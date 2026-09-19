@@ -152,13 +152,17 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 - recon.enumerate_exports(session, module_name) -> List module exports (critical for finding hook targets)
 - injector.attach(target, device) -> Attach to process
 - injector.spawn(package, device) -> Spawn and attach (preferred for early hooking)
+- injector.resume(session) -> Resume a spawned process after hooks are installed
 - injector.inject(session, script) -> Inject Frida script
 - injector.detach(session) -> Detach cleanly
 - script_forge.get_template(name, **kwargs) -> Load script template
+
   Available templates: java-hook, objc-hook, native-hook, ssl-bypass, crypto-monitor, \
   electron-ipc, node-hook, android-comprehensive, android-hardening-bypass, \
   ios-comprehensive, ios-hardening-bypass, windows-comprehensive, windows-hardening-bypass, \
   macos-comprehensive, linux-comprehensive, electron-comprehensive, electron-hardening-bypass
+- script_forge.load_script_file(path) -> Load a Frida script from a local .js file
+
 - observer.collect(session, timeout) -> Collect messages (set timeout based on expected activity)
 - bypass.get_ssl_bypass_script() -> SSL pinning bypass
 - bypass.get_anti_debug_script() -> Anti-debug bypass
@@ -168,6 +172,8 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 ### Static Binary Analysis (no running process needed)
 - binary_analysis.analyze_pe(path) -> PE header/section/import/export/debug info (shows what DLLs and APIs are used)
 - binary_analysis.analyze_elf(path) -> ELF header/section/symbol/dynamic libs
+- binary_analysis.analyze_macho(path) -> Mach-O (incl. FAT): segments, load commands, dylibs, cryptid
+
 - binary_analysis.disassemble(path, address, count, arch) -> Disassemble at file offset (auto-detects arch)
 - binary_analysis.find_strings(path, min_len, encoding, limit) -> Extract strings (ASCII + UTF-16LE + UTF-8)
   Pro tip: Filter for "encrypt", "pipe", "token", "verify", "license", "exit", "error" to find key functions
@@ -197,6 +203,14 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 - unpacker.dump_process_memory(target, device) -> Runtime memory dump via Frida (for non-UPX packers)
 - unpacker.auto_unpack(path) -> Full pipeline: detect → try UPX → try dump → report
 
+### Android APK/DEX Static Analysis (no device needed)
+- apk_analysis.analyze_apk(filepath) -> Manifest (package/version/SDK/permissions/components), \
+native libs, dex count, signing info, protection indicators
+- apk_analysis.analyze_dex(filepath) -> DEX header, class/method/string counts, class names, string sample
+- apk_analysis.detect_protections(filepath) -> Root/SSL-pinning/Frida/emulator-detection and packer indicators
+  Pro tip: run this BEFORE spawning the app — it tells you which bypass template to inject
+
+
 ## Planning Strategy
 
 When planning, follow this decision tree:
@@ -206,6 +220,8 @@ When planning, follow this decision tree:
 4. Need to hook a running process? → attach/spawn → enumerate_modules → enumerate_exports → inject
 5. Electron app? → Use electron-comprehensive template, check for multiple processes
 6. Need to find a specific function? → find_strings + search_bytes to locate, then disassemble + xrefs_to
+7. Android APK on disk? → apk_analysis.analyze_apk + detect_protections first, then spawn with the matching bypass
+
 
 Output a JSON plan with steps. Each step has: id, tool, description, args, depends_on.
 

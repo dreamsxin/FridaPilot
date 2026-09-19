@@ -116,7 +116,11 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp binary find-string-rva <file>` | 定位字符串并返回 RVA（区分文件偏移/RVA） | ❌ |
 | `fp binary xrefs-rva <file>` | RVA-aware 交叉引用（rip-relative 数据引用 + CALL/JMP） | ❌ |
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
+| `fp apk analyze <apk>` | APK 静态分析（manifest/权限/组件/native 库/签名/保护特征） | ❌ |
+| `fp apk dex <dex>` | DEX 分析（header/类/方法/字符串） | ❌ |
+| `fp apk protections <apk>` | Root/SSL pinning/Frida/模拟器检测与加固壳特征 | ❌ |
 | `fp run "<自然语言>"` | AI Agent 闭环执行任务 | ✅ |
+
 
 ---
 

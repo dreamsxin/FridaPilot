@@ -43,6 +43,8 @@ from fridapilot.cli.report import report_cmd
 from fridapilot.cli.crypto import crypto_app
 from fridapilot.cli.binary import binary_app
 from fridapilot.cli.unpack import unpack_app
+from fridapilot.cli.apk import apk_app
+
 from fridapilot.cli.dbg import dbg_cmd
 from fridapilot.cli.run import run_cmd
 
@@ -59,6 +61,8 @@ app.command("report")(report_cmd)
 app.add_typer(crypto_app, name="crypto", help="Binary crypto analysis, key extraction, BCrypt hooking.")
 app.add_typer(binary_app, name="binary", help="Static binary analysis: PE/ELF/Mach-O, disassembly, strings, Go analysis.")
 app.add_typer(unpack_app, name="unpack", help="Packer detection, auto-unpacking, memory dump.")
+app.add_typer(apk_app, name="apk", help="APK/DEX static analysis: manifest, components, protections.")
+
 app.command("dbg")(dbg_cmd)
 app.command("run")(run_cmd)
 
