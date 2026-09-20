@@ -2,6 +2,8 @@
 
 import json as _json
 import sys
+from pathlib import Path
+
 
 import typer
 from rich.console import Console
@@ -164,14 +166,24 @@ def find_strings_cmd(
     binary: str = typer.Argument(..., help="Path to binary file."),
     min_len: int = typer.Option(4, "--min-len", "-m", help="Minimum string length."),
     encoding: str = typer.Option("all", "--encoding", "-e", help="Encoding: ascii, utf16le, utf8, all."),
+    codepage: str = typer.Option(
+        "", "--codepage", "-c",
+        help="Also extract a legacy code page: gbk, gb18030, big5, cp932, cp949, cp1251, cp1252.",
+    ),
     limit: int = typer.Option(200, "--limit", "-l", help="Maximum strings to show."),
     filter_str: str = typer.Option("", "--filter", "-f", help="Filter strings containing this text."),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
-    """Extract strings from a binary file (ASCII, UTF-16LE, UTF-8)."""
+    """Extract strings from a binary (ASCII, UTF-16LE, UTF-8, or a legacy code page).
+
+    The ASCII pass only accepts bytes 0x20-0x7e, so GBK / Shift-JIS / CP1251 text is
+    invisible to it - pass --codepage for those. For PE input each hit also carries
+    its RVA and section, which is what the *-rva commands take.
+    """
     from fridapilot.tools.binary_analysis import find_strings
 
-    results = find_strings(binary, min_len=min_len, encoding=encoding, limit=limit * 5)
+    results = find_strings(binary, min_len=min_len, encoding=encoding,
+                           limit=limit * 5, codepage=codepage)
 
     if filter_str:
         results = [s for s in results if filter_str.lower() in s.value.lower()]
@@ -184,8 +196,56 @@ def find_strings_cmd(
 
     console.print(f"[bold]Strings[/bold] ({len(results)} found)")
     for s in results:
+        rva = f"rva 0x{s.rva:x} {s.section}" if s.rva is not None else ""
         enc_tag = f"[dim]{s.encoding}[/dim]" if s.encoding != "ascii" else ""
-        console.print(f"  0x{s.offset:08x}  {s.value[:120]} {enc_tag}")
+        console.print(f"  0x{s.offset:08x}  {escape(s.value[:110])} [dim]{rva}[/dim] {enc_tag}")
+
+
+@binary_app.command("find-text")
+def find_text_cmd(
+    binary: str = typer.Argument(..., help="Path to binary file."),
+    text: str = typer.Option(..., "--text", "-t", help="Text to locate."),
+    encodings: str = typer.Option(
+        "ascii,utf8,utf16le,gbk", "--encodings", "-e",
+        help="Comma-separated codecs to try: ascii, utf8, utf16le, utf16be, gbk, "
+             "gb18030, big5, cp932, cp949, cp1251, cp1252, latin1.",
+    ),
+    limit: int = typer.Option(50, "--limit", "-l", help="Maximum matches."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Locate one piece of text encoded several ways at once, and report the RVA.
+
+    Use this when the encoding is unknown: the same UI string may be UTF-8 in one
+    build, UTF-16LE in another and CP936 in a third. The encodings that appear in
+    the output are the ones the binary actually uses; codecs that cannot represent
+    the text are skipped, and codecs that produce identical bytes are merged.
+
+    Example:
+      fp binary find-text app.exe --text "license expired" --encodings ascii,utf16le
+    """
+    from fridapilot.tools.binary_analysis import find_text
+
+    codecs = tuple(e.strip() for e in encodings.split(",") if e.strip())
+    results = find_text(binary, text, encodings=codecs, limit=limit)
+
+    if json_output:
+        _emit_json([s.model_dump() for s in results])
+        return
+
+    if not results:
+        console.print(f"[yellow]Not found in any of: {', '.join(codecs)}[/yellow]")
+        return
+
+    table = Table(title=f"'{text}' ({len(results)} matches)")
+    table.add_column("Offset", style="cyan")
+    table.add_column("RVA", style="green")
+    table.add_column("Section")
+    table.add_column("Encoding")
+    for s in results:
+        table.add_row(f"0x{s.offset:x}",
+                      f"0x{s.rva:x}" if s.rva is not None else "-",
+                      s.section or "-", s.encoding)
+    console.print(table)
 
 
 @binary_app.command("search-bytes")
@@ -195,7 +255,11 @@ def search_bytes_cmd(
     limit: int = typer.Option(50, "--limit", "-l", help="Maximum matches."),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
-    """Search for a byte pattern in a binary (supports ?? wildcards)."""
+    """Search for a byte pattern in a binary (supports ?? wildcards).
+
+    For PE input each match also carries its RVA and section, so a hit can be fed
+    straight to func-bounds / disasm-rva.
+    """
     from fridapilot.tools.binary_analysis import search_bytes
 
     results = search_bytes(binary, pattern, limit=limit)
@@ -206,7 +270,9 @@ def search_bytes_cmd(
 
     console.print(f"[bold]Byte Pattern Search[/bold] ({len(results)} matches)")
     for m in results:
-        console.print(f"  0x{m.offset:08x}  {m.matched_bytes}")
+        rva = f"rva 0x{m.rva:x} {m.section}" if m.rva is not None else ""
+        console.print(f"  0x{m.offset:08x}  {m.matched_bytes} [dim]{rva}[/dim]")
+
 
 
 @binary_app.command("xrefs")
@@ -833,4 +899,105 @@ def analyze_macho_cmd(
     if result.encrypted:
         console.print("\n[bold yellow]FairPlay DRM detected![/bold yellow] Use frida-ios-dump to decrypt:")
         console.print("  frida-ios-dump -H <device_ip> -p 22 \"App Name\"")
+
+
+@binary_app.command("metadata")
+def metadata_cmd(
+    binary: str = typer.Argument(..., help="Path to a PE file (.exe / .dll)."),
+    limit: int = typer.Option(15, "--limit", "-l", help="Max rows per list."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Metadata recon: PDB GUID, version resource, manifest, Rich header, toolchain.
+
+    Run this *first*. It is the cheapest pass there is and it often decides the rest
+    of the session: a PDB GUID pulls public symbols off the symbol server, a Rust
+    panic path spells out the original source tree, a version resource names the
+    vendor. Reaching for the disassembler before checking what the build leaked is
+    doing the work in the wrong order.
+    """
+    from fridapilot.tools.pe_metadata import pe_metadata
+
+    if not Path(binary).is_file():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+
+    meta = pe_metadata(binary)
+
+    if json_output:
+        _emit_json(meta)
+        return
+
+    dbg = meta["debug"]
+    console.print(Panel(
+        f"{meta['filepath']}\n"
+        f"{'DLL' if meta['is_dll'] else 'EXE'}  machine={meta['machine']}  "
+        f"{'.NET  ' if meta['is_dotnet'] else ''}toolchain={', '.join(meta['toolchain']['guesses'])}\n"
+        f"PDB: {dbg.get('pdb_path') or '(none)'}\n"
+        f"GUID/Age: {dbg.get('pdb_guid', '-')} / {dbg.get('pdb_age', '-')}\n"
+        f"Symbol server key: {dbg.get('symbol_server_key', '-')}",
+        title="PE Metadata",
+    ))
+
+    if meta["version_info"]:
+        table = Table(title="Version Resource")
+        table.add_column("Key", style="cyan")
+        table.add_column("Value", overflow="fold")
+        for key, value in list(meta["version_info"].items())[:limit]:
+            table.add_row(key, str(value))
+        console.print(table)
+
+    if meta["manifest"]:
+        console.print("[bold]Manifest[/bold]")
+        for key, value in meta["manifest"].items():
+            console.print(f"  {key}: {escape(str(value)[:200])}")
+
+    sec = meta["security"]
+    console.print("[bold]Security[/bold]  " + "  ".join(
+        f"{k}={'[green]on[/green]' if v else '[red]off[/red]'}" for k, v in sec.items()))
+
+    dyn = meta["dynamic_api_resolution"]
+    console.print(f"[bold]Imports[/bold] {dyn['imported_functions']} functions; "
+                  f"resolvers: {', '.join(dyn['resolvers']) or 'none'}"
+                  + ("  [yellow](APIs likely resolved at runtime)[/yellow]"
+                     if dyn["suspicious"] else ""))
+
+    if meta["coff_symbols"]:
+        console.print(f"[bold]COFF symbols[/bold] ({len(meta['coff_symbols'])}, kept by the linker)")
+        for name in meta["coff_symbols"][:limit]:
+            console.print(f"  {name}")
+
+    rust = meta.get("rust")
+    if rust:
+        console.print(f"[bold]Rust source paths[/bold] ({len(rust['source_paths'])}, "
+                      f"{len(rust['own_source_paths'])} outside the toolchain)")
+        for path in rust["own_source_paths"][:limit]:
+            console.print(f"  {escape(path)}")
+        if rust["crates"]:
+            console.print("[bold]Crates[/bold] " + ", ".join(
+                f"{c['name']} {c['version']}" for c in rust["crates"][:limit]))
+
+    rich_hdr = meta["rich_header"]
+    if rich_hdr.get("entries"):
+        console.print(f"[bold]Rich header[/bold] checksum=0x{rich_hdr['checksum']:x}, "
+                      f"{len(rich_hdr['entries'])} build records")
+
+    if meta["resources"]:
+        console.print("[bold]Resources[/bold] " + ", ".join(
+            f"{k}={v}" for k, v in meta["resources"].items()))
+
+    table = Table(title="Sections")
+    table.add_column("Name", style="cyan")
+    table.add_column("RVA", justify="right")
+    table.add_column("VSize", justify="right")
+    table.add_column("Entropy", justify="right")
+    table.add_column("Flags")
+    for s in meta["sections"]:
+        flags = ("X" if s["executable"] else "") + ("W" if s["writable"] else "")
+        entropy = f"{s['entropy']:.2f}"
+        style = "yellow" if s["entropy"] > 7.2 else ""
+        table.add_row(s["name"], f"0x{s['virtual_address']:x}", f"0x{s['virtual_size']:x}",
+                      f"[{style}]{entropy}[/{style}]" if style else entropy, flags)
+    console.print(table)
+
 
