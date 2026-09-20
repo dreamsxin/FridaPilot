@@ -208,7 +208,14 @@ If a signature changes, fix the docs in the same commit — the test will point 
   `pe_rva.find_inline_strings`, and check its `opcode` field before trusting a hit.
   *(enforced: `tests/test_pe_rva.py::test_inline_string_is_invisible_to_contiguous_search`)*
 - **Substring matching on identifiers.** Short indicators must match on token boundaries;
-  `"su" in blob` fires on `issue`, `consumer` and `resume`.
+  `"su" in blob` fires on `issue`, `consumer` and `resume`. The same trap in `pe_rva`:
+  `find_string_rvas` reports *substring* hits, and the obvious "is it a real string" check —
+  read `len(needle)+1` bytes, compare to `needle + b"\0"` — only constrains the **tail**, so
+  `ID3D12Device::CheckFeatureSupport` passes a test for `FeatureSupport`. Two separate analyses
+  concluded a config key existed in a Chromium DLL that way; the image has 18 hits for it and
+  zero standalone strings. Rows therefore carry `whole` and `enclosing` (the NUL-delimited run
+  around the hit) so no caller has to re-derive it. *(enforced:
+  `tests/test_pe_rva.py::test_a_suffix_hit_is_reported_as_a_substring_not_as_a_string`)*
 - **String extraction is encoding-blind by default.** The ASCII scanner accepts only 0x20-0x7e,
   so GBK / Shift-JIS / CP1251 text is invisible to it; pass an explicit `codepage`, or use
   `find_text` to search one string under several codecs. Legacy code pages decode almost any

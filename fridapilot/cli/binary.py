@@ -28,6 +28,19 @@ def _emit_json(obj) -> None:
     sys.stdout.write(_json.dumps(obj, indent=2, default=str) + "\n")
 
 
+def _console_safe(text: str, limit: int = 100) -> str:
+    """Make a string lifted out of a binary printable on THIS console.
+
+    Two independent ways it blows up otherwise, both seen: a `[` in the data starts a
+    Rich markup tag, and a character the console codec cannot encode raises on write
+    (a cp936 stdout killed `find-string-rva` on a mojibake .rdata run). Unprintables
+    become dots, unencodable characters are replaced, markup is escaped.
+    """
+    cleaned = "".join(c if c.isprintable() else "." for c in text[:limit])
+    codec = getattr(console.file, "encoding", None) or "utf-8"
+    return escape(cleaned.encode(codec, "replace").decode(codec, "replace"))
+
+
 
 @binary_app.command("analyze-pe")
 def analyze_pe_cmd(
@@ -548,8 +561,18 @@ def find_string_rva_cmd(
     for r in results:
         if r["rva"] is None:
             console.print(f"  [dim]not found:[/dim] {r['needle'][:60]}")
+            continue
+        line = f"  RVA 0x{r['rva']:08x}  off 0x{r['offset']:08x}  {r['needle'][:80]}"
+        # Every hit is a substring match. Saying so on the spot is the whole point:
+        # `FeatureSupport` inside `ID3D12Device::CheckFeatureSupport` is not the key
+        # you were looking for, and a bare RVA list hides that.
+        if r["whole"]:
+            console.print(line)
+        elif r["enclosing"] is not None:
+            console.print(f"{line}  [yellow]substring of[/yellow] "
+                          f"'{_console_safe(r['enclosing'])}'")
         else:
-            console.print(f"  RVA 0x{r['rva']:08x}  off 0x{r['offset']:08x}  {r['needle'][:80]}")
+            console.print(f"{line}  [dim]({r['section'] or 'no section'}, not in a C string)[/dim]")
 
 
 @binary_app.command("inline-strings")

@@ -199,7 +199,11 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 ### PE RVA-Aware Analysis (ImageBase-correct, for large DLLs like chrome.dll)
 - pe_rva.section_range(path, name) -> {section, start_rva, end_rva, size}. Call this instead of
   guessing scan bounds
-- pe_rva.find_string_rvas(path, needles, encoding) -> Find exact strings and their RVA/file offset
+- pe_rva.find_string_rvas(path, needles, encoding) -> Find exact strings and their RVA/file
+  offset. Hits are SUBSTRING hits: each row carries `enclosing` (the NUL-delimited run the hit
+  sits in) and `whole` (that run equals the needle). Never claim an identifier exists in the
+  image from a hit alone - `FeatureSupport` matched 18 times in one Chromium DLL with zero
+  standalone strings (17 were `CheckFeatureSupport ...` D3D12 logs)
 - pe_rva.find_inline_strings(path, text, encoding, section) -> Find a string the code BUILDS in
   registers (movabs imm64) rather than points at. Reach for this when find_string_rvas finds
   nothing, or finds the string but xrefs_to_rva reports no references. An inline string has no
@@ -292,7 +296,7 @@ Tiny import table + LoadLibrary/GetProcAddress → dynamic API resolution: hook 
 
 Step 1 — Anchor location. find_string_rvas (known encoding) / find_text (unknown encoding,
 searches many codecs) / search_bytes (constants, magic). All return RVA + section, feeding
-step 2 directly.
+step 2 directly. Check `whole`/`enclosing` before treating a hit as the string you wanted.
 
 Step 2 — Cross-references. FIRST decide what the target is. If it is a FUNCTION, use
 function_xrefs, not xrefs_to_rva(kinds=("call","jmp")): a callee reached only through a

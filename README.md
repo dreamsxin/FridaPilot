@@ -270,7 +270,7 @@ fp binary find-text target.dll --text "许可过期" --encodings utf8,utf16le,gb
 fp binary search-bytes target.dll "48 8b ?? 48 89"
 ```
 
-- `find-string-rva`：已知编码时用，返回 RVA 供后续 xref
+- `find-string-rva`：已知编码时用，返回 RVA 供后续 xref。**命中都是子串命中**——输出会标出该命中所属的完整 NUL 结尾串，只有 `whole` 为真才说明镜像里存在这个独立字符串。`读 len(key)+1 字节 == key + "\0"` 这个判据只约束尾部，`ID3D12Device::CheckFeatureSupport` 会通过针对 `FeatureSupport` 的测试（实测某 Chromium DLL：18 处命中，0 处独立串）
 - `find-text`：不知道编码时用，多编码同时搜
 - `search-bytes`：搜常量/magic/字节模式
 

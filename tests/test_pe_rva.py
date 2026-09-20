@@ -48,6 +48,7 @@ from .synthetic_pe import (
     INDIRECT_FN_RVA,
     INLINE_RVA,
     INLINE_TEXT,
+    MARKER_TEXT,
     PTR_RVA,
     RDATA_RVA,
     RIP_FORMS,
@@ -547,6 +548,55 @@ def test_field_refs_warns_when_the_offset_cannot_discriminate(fixture_pe, caplog
     assert len(hits) > 100
     assert "not discriminating" in caplog.text
     assert "vtable_of_function" in caplog.text
+
+
+# ── a hit is a substring, and the tool has to say which ──
+
+def test_a_suffix_hit_is_reported_as_a_substring_not_as_a_string(fixture_pe):
+    """`needle + NUL` only constrains the tail; the byte before the hit decides.
+
+    Two separate analyses concluded a config key existed in a Chromium DLL because
+    `FeatureSupport` "matched exactly" — it was the tail of
+    `ID3D12Device::CheckFeatureSupport`. Reporting the enclosing run is what makes the
+    difference visible without every caller re-deriving it.
+    """
+    path, _placed, _end = fixture_pe
+
+    exact = [r for r in find_string_rvas(path, [MARKER_TEXT]) if r["rva"] is not None]
+    assert exact, f"{MARKER_TEXT!r} is in the fixture .rdata"
+    assert all(r["whole"] for r in exact)
+    assert exact[0]["enclosing"] == MARKER_TEXT
+    assert exact[0]["section"] == ".rdata"
+
+    suffix = MARKER_TEXT[5:]                      # "PilotMarker" — ends where it ends
+    hits = [r for r in find_string_rvas(path, [suffix]) if r["rva"] is not None]
+    assert hits, f"{suffix!r} must still be reported: it IS present as a substring"
+    assert not any(r["whole"] for r in hits), "a suffix is not a standalone string"
+    assert hits[0]["enclosing"] == MARKER_TEXT
+
+
+def test_a_hit_outside_any_c_string_is_not_given_an_enclosing_string(fixture_pe):
+    """Inline-constructed text sits in code, where a NUL walk has nothing to find."""
+    path, _placed, _end = fixture_pe
+    # The 8-byte head of the inline string is a real movabs operand in .text.
+    head = INLINE_TEXT[:8]
+    hits = [r for r in find_string_rvas(path, [head]) if r["section"] == ".text"]
+    assert hits, "the movabs immediate carries the first 8 bytes contiguously"
+    assert not any(r["whole"] for r in hits)
+
+
+def test_enclosing_runs_survive_printing_on_a_narrow_console():
+    """`find-string-rva` renders `enclosing`, which is arbitrary bytes from the image.
+
+    Printing it raw crashed the command on a cp936 console (unencodable characters in
+    a mojibake .rdata run), and a `[` in the data would be parsed as Rich markup.
+    """
+    from fridapilot.cli.binary import _console_safe
+
+    safe = _console_safe("head[bold]\u4e2d\x07tail")
+    assert "\x07" not in safe                       # control byte neutralised
+    assert "\\[bold]" in safe                       # markup escaped, not interpreted
+    safe.encode("cp936")                            # would raise before the fix
 
 
 # ── the displacement prefilter: it must save work without losing references ──

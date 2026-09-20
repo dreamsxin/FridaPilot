@@ -206,6 +206,45 @@ def _find_all(data: bytes, pattern: bytes, start: int = 0):
 
 
 
+def _enclosing_cstring(data: bytes, idx: int, pat_len: int, wide: bool,
+                       window: int = 512) -> tuple[bytes | None, bool]:
+    """The NUL-terminated string containing a hit, and whether the hit IS that string.
+
+    A substring search answers "these bytes appear here", never "a string equal to the
+    needle lives here". The difference has produced wrong conclusions twice in real
+    analyses, both times through the same shortcut: checking only that the needle is
+    followed by NUL. ``ID3D12Device::CheckFeatureSupport`` *ends* with
+    ``FeatureSupport\\0``, so it passes that test — the tail is constrained, the start
+    is not. Only the byte before the hit can settle it, so this walks both ways.
+
+    Returns (raw_bytes, whole). ``None`` means no terminator within ``window`` on one
+    side, i.e. the hit is probably not in a C string at all (code, a length-prefixed
+    blob, binary data) — reported as unknown rather than guessed. What is returned is
+    the NUL-delimited run around the hit, so when the neighbouring bytes are pointers
+    rather than text the run legitimately carries that noise with it; only ``whole``
+    is a verdict.
+    """
+    step = 2 if wide else 1
+    unit_zero = b"\0" * step
+    lo = max(idx - window, 0)
+    start = idx
+    while start - step >= lo:
+        if data[start - step:start] == unit_zero:
+            break
+        start -= step
+    else:
+        return None, False
+    hi = min(idx + pat_len + window, len(data))
+    end = idx + pat_len
+    while end + step <= hi:
+        if data[end:end + step] == unit_zero:
+            break
+        end += step
+    else:
+        return None, False
+    return data[start:end], start == idx and end == idx + pat_len
+
+
 def find_string_rvas(
     binary_path: str | Path,
     needles: list[str],
@@ -218,7 +257,16 @@ def find_string_rvas(
         encoding: "ascii" or "utf16le".
 
     Returns:
-        List of {needle, offset, rva, encoding}; offset/rva are None if absent.
+        List of {needle, offset, rva, encoding, section, whole, enclosing};
+        offset/rva are None if absent.
+
+        ``whole`` and ``enclosing`` exist because every hit is a *substring* match.
+        ``enclosing`` is the NUL-terminated string the hit sits inside (None when the
+        hit is not inside one), and ``whole`` is True only when that string equals the
+        needle. Do not treat a hit as a standalone string, or as evidence that an
+        identifier exists in the image, without checking them: 18 hits for
+        ``FeatureSupport`` in one Chromium DLL were 17 D3D12 log messages plus
+        ``queryFeatureSupport``, and none of them was the key being looked for.
     """
     img = PEImage(binary_path)
     data = img._data
@@ -231,14 +279,21 @@ def find_string_rvas(
             idx = data.find(pat, start)
             if idx < 0:
                 break
+            rva = img.off_to_rva(idx)
+            raw, whole = _enclosing_cstring(data, idx, len(pat), encoding != "ascii")
+            codec = "utf-8" if encoding == "ascii" else "utf-16-le"
             out.append({
                 "needle": needle, "offset": idx,
-                "rva": img.off_to_rva(idx), "encoding": encoding,
+                "rva": rva, "encoding": encoding,
+                "section": img.section_of(rva) if rva is not None else "",
+                "whole": whole,
+                "enclosing": raw.decode(codec, "replace") if raw is not None else None,
             })
             found += 1
             start = idx + 1
         if found == 0:
-            out.append({"needle": needle, "offset": None, "rva": None, "encoding": encoding})
+            out.append({"needle": needle, "offset": None, "rva": None, "encoding": encoding,
+                        "section": "", "whole": False, "enclosing": None})
     return out
 
 

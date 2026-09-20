@@ -115,10 +115,20 @@ results = find_string_rvas("chrome.dll", ["enableTelemetry", "deviceModelName"])
 results = find_string_rvas("chrome.dll", ["宽字符"], encoding="utf16le")
 ```
 
-<!-- return-keys: find_string_rvas = needle, offset, rva, encoding -->
-Rows: `needle`, `offset` (file offset), `rva`, `encoding`. A needle that is absent still gets a
-row, with `offset` and `rva` set to `None`. Every occurrence is reported, so a string that
-appears twice yields two rows.
+<!-- return-keys: find_string_rvas = needle, offset, rva, encoding, section, whole, enclosing -->
+Rows: `needle`, `offset` (file offset), `rva`, `encoding`, `section`, `whole`, `enclosing`. A
+needle that is absent still gets a row, with `offset` and `rva` set to `None`. Every occurrence
+is reported, so a string that appears twice yields two rows.
+
+**Every hit is a substring match — check `whole` before believing it.** `enclosing` is the
+NUL-delimited run the hit sits inside (`None` when it is not in a C string at all, e.g. a
+`movabs` immediate in `.text`), and `whole` is True only when that run equals the needle.
+Searching `FeatureSupport` in one Chromium DLL returns 18 hits and **zero** whole strings: 17 are
+`CheckFeatureSupport …` D3D12 log messages and one is `queryFeatureSupport`. The shortcut that
+looks right and is not: reading `len(needle)+1` bytes and comparing to `needle + b"\0"` only
+constrains the *tail*, so `ID3D12Device::CheckFeatureSupport` passes a test for
+`FeatureSupport`. That mistake has produced a wrong "the key exists in the kernel" conclusion
+twice.
 
 ```bash
 fp binary find-string-rva chrome.dll "enableTelemetry,deviceModelName"
