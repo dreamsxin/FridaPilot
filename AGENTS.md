@@ -38,7 +38,11 @@ python -m fridapilot.cli.main --help    # same as `fp --help` without installing
 
 
 
-There is no CI configuration in this repo. Run the suite yourself before committing.
+`.github/workflows/ci.yml` runs `ruff check` and the suite on ubuntu-latest and
+windows-latest for every push and PR. The Windows job is the one that exercises the ntdll
+ground-truth test; the Linux job proves the suite does not depend on a local binary. CI installs
+`.[dev,mcp]` only — every litellm import is lazy, so the tests must pass without the agent extra.
+
 
 ## Adding things — the wiring that is easy to forget
 
@@ -62,13 +66,17 @@ several newer tool modules (`apk_analysis`, `unpacker`, `debugger`, `lldb_bridge
 dataclasses. Both patterns exist — match the module you are editing rather than converting it
 as a side effect. CLI code that serialises a dataclass uses `dataclasses.asdict`.
 
-**The MCP server (`mcp/server.py`) has its own hand-written `Tool(...)` list and its own
-`if name == ...` dispatch chain.** Adding a tool to the Agent does not add it to MCP: you must
-append a `Tool(...)` with a JSON schema *and* a dispatch branch, and add the argument name to
-`PATH_ARGUMENTS` if it carries a filesystem path so the whitelist covers it.
-*(enforced: `tests/test_mcp.py` — declaration/dispatch parity, schema shape, path coverage)*
-It targets the MCP 1.x low-level decorator API; 2.x removed `@server.list_tools()`, which is why
-the dependency is pinned `mcp>=1.0,<2`.
+**The MCP server (`mcp/server.py`) is a separate surface from the Agent registry.** Adding a
+tool there means two things: a typed wrapper decorated with `@mcp.tool()` (MCPServer derives the
+JSON schema from the annotations and the description from the docstring, so there is no schema to
+hand-write and none to keep in sync), and a branch in `_handle_tool` that does the work. If an
+argument carries a filesystem path, add its name to `PATH_ARGUMENTS` so `_dispatch` runs it
+through the `FRIDAPILOT_ALLOWED_DIRS` whitelist. Tools must not raise: `_dispatch` converts
+failures into `{success: false, error, tool, duration}`, because an exception escaping a tool
+reaches the client as an opaque `UnexpectedToolError` with the cause stripped.
+*(enforced: `tests/test_mcp.py` — wrapper/dispatch parity, schema shape, path coverage,
+envelope on failure)*
+
 
 
 

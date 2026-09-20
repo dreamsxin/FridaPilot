@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Both platforms matter: tests/test_pe_rva.py derives ground truth from the
+    # real ntdll.dll and only runs on the Windows runner, while the Linux runner
+    # proves the suite does not depend on a local binary.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # The agent extra (litellm) is deliberately absent: every litellm import is
+      # lazy, so the suite must pass without it.
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev,mcp]"
+
+      - run: ruff check fridapilot tests
+      - run: python -m pytest -q

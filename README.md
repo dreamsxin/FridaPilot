@@ -459,7 +459,8 @@ apk_protections           # Root/SSL pinning/Frida/模拟器检测与加固壳�
 - **路径白名单**：`FRIDAPILOT_ALLOWED_DIRS` 限制可分析目录，作用于所有带路径参数的工具
 - **审计日志**：所有 MCP 工具调用自动记录
 - **标准化响应**：统一 `{success, data, error, duration}` 格式
-- **SDK 版本**：使用 MCP 1.x 低层 API（`@server.list_tools()` / `@server.call_tool()`），依赖已约束为 `mcp>=1.0,<2`
+- **SDK 版本**：使用 MCP 2.x 的 `MCPServer` API（`@mcp.tool()`，schema 由函数签名自动推导），依赖 `mcp>=2.0`
+
 
 
 ## Agent 工作流（需要 LLM）
