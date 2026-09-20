@@ -27,8 +27,10 @@ from fridapilot.tools.pe_rva import (
     PEImage,
     function_bounds,
     map_refs_to_functions,
+    section_range,
     xrefs_to_rva,
 )
+
 
 from .synthetic_pe import (
     CALL_TARGET_RVA,
@@ -156,8 +158,75 @@ def test_strict_pdata_mode_drops_only_uncovered_code(fixture_pe):
     assert loose - strict == {placed["leaf mov rax, [rip+d]"]}
 
 
+# ── scan range resolution (the silent-partial-scan footgun) ─────────────────
+
+def test_range_defaults_to_the_whole_text_section(fixture_pe):
+    """Omitting the range must scan all of .text, not a guessed slice."""
+    path, _placed, _end = fixture_pe
+    explicit = {r["from_rva"] for r in xrefs_to_rva(
+        path, TARGET_RVA, TEXT_RVA, TEXT_RVA + TEXT_VSIZE, kinds=("rip",))}
+    defaulted = {r["from_rva"] for r in xrefs_to_rva(path, TARGET_RVA, kinds=("rip",))}
+    assert defaulted == explicit
+
+
+def test_section_argument_selects_the_section(fixture_pe):
+    """`section=".rdata"` finds the pointer-table reference without any RVA maths."""
+    path, _placed, _end = fixture_pe
+    ptrs = xrefs_to_rva(path, TARGET_RVA, section=".rdata", kinds=("ptr",))
+    assert [r["from_rva"] for r in ptrs] == [PTR_RVA]
+
+
+def test_unknown_section_is_an_error_not_an_empty_result(fixture_pe):
+    path, _placed, _end = fixture_pe
+    with pytest.raises(ValueError, match="no section named"):
+        xrefs_to_rva(path, TARGET_RVA, section=".nope")
+
+
+def test_partial_range_is_logged_as_a_warning(fixture_pe, caplog):
+    """The failure mode this guards: a third of a 240 MB .text read as 'no refs'."""
+    path, _placed, _end = fixture_pe
+    with caplog.at_level("WARNING", logger="fridapilot.tools.pe_rva"):
+        xrefs_to_rva(path, TARGET_RVA, TEXT_RVA, TEXT_RVA + TEXT_VSIZE // 4,
+                     kinds=("rip",))
+    assert "covers 25.0% of .text" in caplog.text
+
+
+
+def test_full_range_does_not_warn(fixture_pe, caplog):
+    path, _placed, _end = fixture_pe
+    with caplog.at_level("WARNING", logger="fridapilot.tools.pe_rva"):
+        xrefs_to_rva(path, TARGET_RVA, kinds=("rip",))
+    assert not caplog.records
+
+
+def test_section_range_helper(fixture_pe):
+    path, _placed, _end = fixture_pe
+    assert section_range(path, ".text") == {
+        "section": ".text", "start_rva": TEXT_RVA,
+        "end_rva": TEXT_RVA + TEXT_VSIZE, "size": TEXT_VSIZE,
+    }
+    assert section_range(path, ".nope") is None
+
+
+def test_map_refs_reports_what_it_scanned(fixture_pe):
+    path, _placed, _end = fixture_pe
+    full = map_refs_to_functions(path, {"g": TARGET_RVA})
+    assert full["section"] == ".text"
+    assert full["section_coverage"] == 1.0
+    assert (full["scan_start_rva"], full["scan_end_rva"]) == (TEXT_RVA, TEXT_RVA + TEXT_VSIZE)
+
+    partial = map_refs_to_functions(path, {"g": TARGET_RVA}, TEXT_RVA,
+                                    TEXT_RVA + TEXT_VSIZE // 2)
+    assert partial["section_coverage"] == 0.5
+    # a label can be "unreferenced" purely because the scan stopped early
+    assert partial["section_coverage"] < full["section_coverage"]
+
+
 def test_call_and_ptr_kinds(fixture_pe):
     path, placed, _end = fixture_pe
+
+
+
     calls = xrefs_to_rva(path, CALL_TARGET_RVA, TEXT_RVA, TEXT_RVA + TEXT_VSIZE,
                          kinds=("call",))
     assert [r["from_rva"] for r in calls] == [placed["call"]]

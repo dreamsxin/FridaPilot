@@ -197,8 +197,16 @@ When target is an iOS/macOS app, follow this specialized pipeline:
   Pro tip: Source paths reveal internal architecture (e.g., "internal/pkg/ipc/npipe_windows.go" -> Named Pipe IPC)
 
 ### PE RVA-Aware Analysis (ImageBase-correct, for large DLLs like chrome.dll)
+- pe_rva.section_range(path, name) -> {section, start_rva, end_rva, size}. Call this instead of
+  guessing scan bounds
 - pe_rva.find_string_rvas(path, needles, encoding) -> Find exact strings and their RVA/file offset
-- pe_rva.xrefs_to_rva(path, target_rva, start, end) -> Cross-references to a RVA (correct across sections)
+- pe_rva.xrefs_to_rva(path, target_rva, start, end, kinds, section) -> Cross-references to an RVA
+  (correct across sections). Omit start/end to scan the whole section (.text by default, or
+  section=".rdata" with kinds=("ptr",)). NEVER pass a hand-picked sub-range unless you mean to:
+  a partial scan returns fewer refs and is indistinguishable from "no references" - this has
+  produced a false negative on a 240 MB .text. For N targets use map_refs_to_functions, which
+  scans once and reports section_coverage
+
 - pe_rva.field_refs(path, offset, kind, start, end) -> Find struct field read/write at a given offset (e.g., offset=0xB0)
 - pe_rva.map_refs_to_functions(path, strings, start, end) -> Map multiple strings to their consuming functions in one pass
 - pe_rva.disassemble_rva(path, rva, count) -> RVA-aware disassembly with symbol annotations

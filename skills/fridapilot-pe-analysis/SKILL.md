@@ -167,9 +167,18 @@ headers map to themselves and are labelled `(headers)`.
 
 ### xrefs_to_rva — cross-references to an RVA
 
+**The range defaults to the whole section. Do not hand-pick one unless you mean to.** A partial
+range returns fewer references, and an empty list from a partial scan is indistinguishable from
+"nothing references this" — that exact mistake (a third of a 240 MB `.text`, read as "no
+references") is why the default exists. Partial coverage is logged as a warning, and the CLI
+prints the scanned extent with its percentage.
 
 ```python
-refs = xrefs_to_rva(
+from fridapilot.tools.pe_rva import section_range
+
+refs = xrefs_to_rva("chrome.dll", 0x1044f64c)                    # whole .text
+refs = xrefs_to_rva("chrome.dll", 0xfb3dfc0, section=".rdata", kinds=("ptr",))
+refs = xrefs_to_rva(                                             # deliberately narrowed
     "chrome.dll",
     target_rva=0x1044f64c,
     scan_start_rva=0xc42a90,
@@ -178,10 +187,13 @@ refs = xrefs_to_rva(
     verify=True,
     scan_gaps=True,
 )
+text = section_range("chrome.dll", ".text")                      # {start_rva, end_rva, size}
 ```
 
+<!-- return-keys: section_range = section, start_rva, end_rva, size -->
 <!-- return-keys: xrefs_to_rva = from_rva, mnemonic, op_str, target_rva, kind, size -->
-Rows: `from_rva`, `mnemonic`, `op_str`, `target_rva`, `kind`, `size`.
+Rows: `from_rva`, `mnemonic`, `op_str`, `target_rva`, `kind`, `size`. `section_range` returns
+`section`, `start_rva`, `end_rva`, `size`.
 
 Kinds: `rip` (rip-relative memory operand), `call` (`E8 rel32`), `jmp` (`E9 rel32` / `EB rel8`),
 `imm64` (`movabs r64, ImageBase+rva`), `ptr` (raw 8-byte VA in data), `rva32` (raw 4-byte RVA).
@@ -189,6 +201,11 @@ Kinds: `rip` (rip-relative memory operand), `call` (`E8 rel32`), `jmp` (`E9 rel3
 `ptr` matters for tables: Chromium collects `const char*` into `.rdata` arrays and only LEAs
 the array base, so individual strings have no rip reference at all. If `rip` finds nothing for
 a string that is obviously used, rescan `.rdata` with `kinds=("ptr",)`.
+
+If that also finds nothing, the string may be **built inline** — Chromium emits
+`movabs rcx, 0x6573696f4e747865` ("extNoise") and assembles it in registers, so there is no
+operand pointing at `.rdata` to find. The little-endian immediate bytes are the characters in
+order, so `find_text` locates it directly in `.text`; `xrefs_to_rva` structurally cannot.
 
 How rip references are found (relevant when judging results):
 
@@ -203,13 +220,15 @@ How rip references are found (relevant when judging results):
 
 `verify=False` skips capstone confirmation in pass B only — pass A always decodes.
 `scan_gaps=False` runs pass A alone: fewer false positives when the range spans data, at the
-cost of missing references outside known functions.
+cost of missing references outside known functions — and it skips leaf functions entirely, so a
+small wrapper that touches the target will not show up.
 
 ```bash
+fp binary xrefs-rva chrome.dll --target 0x1044f64c
+fp binary xrefs-rva chrome.dll --target 0xfb3dfc0 --section .rdata --kinds ptr
 fp binary xrefs-rva chrome.dll --target 0x1044f64c --start 0xc42a90 --end 0xc43f95
-fp binary xrefs-rva chrome.dll --target 0xfb3dfc0 --start 0xf545000 --end 0x11394000 --kinds ptr
-fp binary xrefs-rva chrome.dll --target 0x1044f64c --start 0x1000 --end 0xf545000 --pdata-only
 ```
+
 
 ### function_bounds — exact function extent
 
@@ -275,16 +294,20 @@ Note the option names: `--offset`, `--start-rva`, `--end-rva` (not `--start` / `
 result = map_refs_to_functions(
     "chrome.dll",
     targets={"enableCanvasNoise": 0xfcae886, "webglRenderer": 0xfcba225},
-    scan_start_rva=0x1000,
-    scan_end_rva=0xf545000,
     kinds=("rip",),
 )
 ```
 
-<!-- return-keys: map_refs_to_functions = functions, orphans, unreferenced, scanned_bytes -->
+<!-- return-keys: map_refs_to_functions = functions, orphans, unreferenced, scanned_bytes, scan_start_rva, scan_end_rva, section, section_coverage -->
 Returns `functions` (each with `begin_rva`, `end_rva`, `size`, `labels`, `refs`, sorted by how
 many distinct labels they use), `orphans` (references outside any `.pdata` entry),
-`unreferenced` (labels nothing pointed at) and `scanned_bytes`.
+`unreferenced` (labels nothing pointed at), `scanned_bytes`, and the range actually scanned:
+`scan_start_rva`, `scan_end_rva`, `section`, `section_coverage` (1.0 = the whole section).
+
+**Check `section_coverage` before believing `unreferenced`.** Anything below 1.0 means the scan
+did not see the whole section, so "unreferenced" only means "not referenced in the part I looked
+at". The range defaults to the whole section, so it is 1.0 unless you narrowed it.
+
 
 The CLI variant resolves the strings for you — `--strings` for an explicit list, `--prefix` to
 auto-collect every NUL-terminated `.rdata` string with that prefix:

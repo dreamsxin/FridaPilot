@@ -700,24 +700,26 @@ def map_refs_cmd(
         console.print("[red]No target strings resolved.[/red]")
         return
 
-    text = None
-    for va, vs, _praw, rsize, name in img._sections:
-        if name == ".text":
-            text = (va, va + max(vs, rsize))
-            break
-    s_rva = int(start, 0) if start else (text[0] if text else 0x1000)
-    e_rva = int(end, 0) if end else (text[1] if text else 0x1000)
-
-    err_console.print(f"[bold]{len(targets)} target strings[/bold], scanning "
-                      f"[0x{s_rva:x},0x{e_rva:x})…")
     kind_tuple = tuple(k.strip() for k in kinds.split(",") if k.strip())
-    res = map_refs_to_functions(binary, targets, s_rva, e_rva, kinds=kind_tuple)
+    res = map_refs_to_functions(binary, targets,
+                                int(start, 0) if start else None,
+                                int(end, 0) if end else None,
+                                kinds=kind_tuple)
+    err_console.print(
+        f"[bold]{len(targets)} target strings[/bold], scanned "
+        f"[0x{res['scan_start_rva']:x},0x{res['scan_end_rva']:x}) = "
+        f"{res['section_coverage'] * 100:.1f}% of {res['section'] or '?'}")
 
     if json_output:
         _emit_json(res)
         return
 
+    if res["section_coverage"] < 0.999:
+        console.print("[yellow]Partial scan: an incomplete range under-reports and "
+                      "looks like 'no references'.[/yellow]")
+
     shown = [f for f in res["functions"] if len(f["labels"]) >= min_labels]
+
     console.print(f"\n[bold]{len(shown)} function(s)[/bold] "
                   f"(of {len(res['functions'])}) with >= {min_labels} distinct string(s):\n")
     for f in shown:
@@ -772,8 +774,12 @@ def func_bounds_cmd(
 def xrefs_rva_cmd(
     binary: str = typer.Argument(..., help="Path to PE file."),
     target: str = typer.Option(..., "--target", "-t", help="Target RVA to find references to."),
-    start: str = typer.Option(..., "--start", help="Scan range start RVA."),
-    end: str = typer.Option(..., "--end", help="Scan range end RVA."),
+    start: str = typer.Option("", "--start", help="Scan start RVA (default: start of --section)."),
+    end: str = typer.Option("", "--end", help="Scan end RVA (default: end of --section)."),
+    section: str = typer.Option(
+        ".text", "--section", "-s",
+        help="Section to scan when --start/--end are omitted. Use .rdata with --kinds ptr.",
+    ),
     kinds: str = typer.Option(
         "rip,call,jmp", "--kinds", "-k",
         help="Comma list: rip,call,jmp,imm64,ptr,rva32. Use 'ptr' (scan .rdata) "
@@ -799,34 +805,60 @@ def xrefs_rva_cmd(
     linear sweep of a large .text desynchronises on embedded data and silently
     misses most references.
 
-    Examples:
-      # code referencing a config field string
-      fp binary xrefs-rva chrome.dll --target 0xfae6439 --start 0x1000 --end 0xf545000
+    The range defaults to the whole section, and the scanned extent is printed with
+    its coverage: a truncated range returns fewer hits, which is indistinguishable
+    from "no references" unless you can see how much was actually scanned.
 
-      # string referenced only from a pointer table (scan .rdata, not .text)
-      fp binary xrefs-rva chrome.dll --target 0xfb3dfc0 --start 0xf545000 \\
-          --end 0x11394000 --kinds ptr
+    Examples:
+      # whole .text, no addresses to look up
+      fp binary xrefs-rva chrome.dll --target 0xfae6439
+
+      # string referenced only from a pointer table
+      fp binary xrefs-rva chrome.dll --target 0xfb3dfc0 --section .rdata --kinds ptr
+
+      # deliberately narrowed to one function (fast)
+      fp binary xrefs-rva chrome.dll --target 0xfae6439 --start 0xc42a90 --end 0xc43f95
     """
-    from fridapilot.tools.pe_rva import xrefs_to_rva
+    from fridapilot.tools.pe_rva import section_range, xrefs_to_rva
 
     kind_tuple = tuple(k.strip() for k in kinds.split(",") if k.strip())
-    results = xrefs_to_rva(binary, int(target, 0), int(start, 0), int(end, 0),
+    start_rva = int(start, 0) if start else None
+    end_rva = int(end, 0) if end else None
+    results = xrefs_to_rva(binary, int(target, 0), start_rva, end_rva,
                            kinds=kind_tuple, verify=not no_verify,
-                           scan_gaps=not pdata_only)
-
+                           scan_gaps=not pdata_only,
+                           section="" if (start_rva is not None and end_rva is not None)
+                                   else section)
 
     if json_output:
         _emit_json(results)
         return
 
-    console.print(f"[bold]RVA xrefs to 0x{int(target,0):x}[/bold] "
-                  f"in [0x{int(start,0):x},0x{int(end,0):x}) — {len(results)} found")
+    # Show what was actually covered - the fix for the failure mode where a third of
+    # a 240 MB .text was scanned and the empty result was read as "no references".
+    sec = section_range(binary, section) if section else None
+    scanned_lo = start_rva if start_rva is not None else (sec or {}).get("start_rva", 0)
+    scanned_hi = end_rva if end_rva is not None else (sec or {}).get("end_rva", 0)
+    span = max(scanned_hi - scanned_lo, 0)
+    coverage = ""
+    if sec and sec["size"]:
+        pct = 100.0 * span / sec["size"]
+        coverage = f" = {pct:.1f}% of {section}"
+        if pct < 99.9:
+            coverage += " [yellow](partial!)[/yellow]"
+
+    console.print(f"[bold]RVA xrefs to 0x{int(target, 0):x}[/bold] — {len(results)} found")
+    console.print(f"[dim]scanned 0x{scanned_lo:x}-0x{scanned_hi:x} "
+                  f"({span / 1048576:.2f} MB{coverage})[/dim]")
     for x in results:
         console.print(f"  RVA 0x{x['from_rva']:08x}  [{x['kind']:<5s}]  "
                       f"{x['mnemonic']} {escape(x['op_str'])}")
     if not results and "ptr" not in kind_tuple:
         console.print("[dim]  Tip: 0 hits for a string that is clearly used? It may be "
-                      "in a const char* table — retry with --kinds ptr over .rdata.[/dim]")
+                      "in a const char* table — retry with --section .rdata --kinds ptr, "
+                      "or the string may be built inline with movabs immediates "
+                      "(use find-text / search-bytes instead).[/dim]")
+
 
 
 @binary_app.command("analyze-macho")

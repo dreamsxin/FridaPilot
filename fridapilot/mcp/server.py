@@ -420,21 +420,39 @@ def binary_find_string_rva(
 
 
 @mcp.tool()
-def binary_xrefs_rva(
-    binary_path: str, target_rva: int, scan_start_rva: int, scan_end_rva: int,
-    kinds: list[str] = ['rip', 'call', 'jmp'], pdata_only: bool = False,
+def binary_section_range(
+
+    binary_path: str, section: str = ".text",
 ) -> dict[str, Any]:
-    """Cross-references to an RVA: rip-relative data refs plus direct call/jmp. Cost
-    scales with the scanned range - narrow it with binary_func_bounds."""
+    """Start/end RVA and size of a PE section. Call this instead of guessing scan
+    bounds: a truncated range makes binary_xrefs_rva under-report, and the empty
+    result is indistinguishable from 'nothing references this'."""
+    return _dispatch("binary_section_range", {"binary_path": binary_path,
+                                              "section": section})
+
+
+@mcp.tool()
+def binary_xrefs_rva(
+    binary_path: str, target_rva: int, scan_start_rva: int | None = None,
+    scan_end_rva: int | None = None, section: str = ".text",
+    kinds: list[str] | None = None, pdata_only: bool = False,
+) -> dict[str, Any]:
+    """Cross-references to an RVA: rip-relative data refs plus direct call/jmp.
+    The range defaults to the whole section (.text; use .rdata with kinds=["ptr"]),
+    because scanning part of a section returns fewer references and looks exactly
+    like having none. The result reports the range actually scanned and its coverage.
+    Cost scales with the scanned bytes - narrow it with binary_func_bounds when you
+    already know the region, and prefer one map-refs style pass for many targets."""
     return _dispatch("binary_xrefs_rva", {
         "binary_path": binary_path, "target_rva": target_rva,
-        "scan_start_rva": scan_start_rva, "scan_end_rva": scan_end_rva, "kinds": kinds,
-        "pdata_only": pdata_only,
+        "scan_start_rva": scan_start_rva, "scan_end_rva": scan_end_rva,
+        "section": section, "kinds": kinds, "pdata_only": pdata_only,
     })
 
 
 @mcp.tool()
 def binary_func_bounds(
+
     binary_path: str, rva: int,
 ) -> dict[str, Any]:
     """Exact function bounds for an RVA from the x64 .pdata table. Null when the RVA has
@@ -953,16 +971,28 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
         return find_string_rvas(arguments["binary_path"], list(arguments["needles"]),
                                 arguments.get("encoding", "ascii"))
 
+    if name == "binary_section_range":
+        from fridapilot.tools.pe_rva import section_range
+        found = section_range(arguments["binary_path"], arguments.get("section", ".text"))
+        if found is None:
+            raise ValueError(f"no section named {arguments.get('section', '.text')!r}")
+        return found
+
     if name == "binary_xrefs_rva":
         from fridapilot.tools.pe_rva import xrefs_to_rva
+        start = arguments.get("scan_start_rva")
+        end = arguments.get("scan_end_rva")
         return xrefs_to_rva(
             arguments["binary_path"],
             int(arguments["target_rva"]),
-            int(arguments["scan_start_rva"]),
-            int(arguments["scan_end_rva"]),
+            int(start) if start is not None else None,
+            int(end) if end is not None else None,
             kinds=tuple(arguments.get("kinds") or ("rip", "call", "jmp")),
             scan_gaps=not arguments.get("pdata_only", False),
+            section="" if (start is not None and end is not None)
+                    else arguments.get("section", ".text"),
         )
+
 
     if name == "binary_func_bounds":
         from fridapilot.tools.pe_rva import function_bounds

@@ -17,11 +17,15 @@ No LLM dependency. Requires: pefile, capstone.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 class PEImage:
+
     """RVA/VA/file-offset aware PE image.
 
     Example:
@@ -136,6 +140,19 @@ class PEImage:
             else:
                 return begin, end, unwind
         return None
+
+    def section_range(self, name: str) -> tuple[int, int] | None:
+        """(start_rva, end_rva) of a section by name, or None.
+
+        The end uses ``max(VirtualSize, SizeOfRawData)`` because a scan wants every
+        byte the section can hold; table *parsing* uses the min instead (see
+        exception_table).
+        """
+        for va, vs, _praw, rsize, sec in self._sections:
+            if sec == name:
+                return va, va + max(vs, rsize)
+        return None
+
 
 
 
@@ -582,13 +599,12 @@ def _iter_rip_refs(
 
 
 def map_refs_to_functions(
-
-
     binary_path: str | Path,
     targets: dict[str, int],
-    scan_start_rva: int,
-    scan_end_rva: int,
+    scan_start_rva: int | None = None,
+    scan_end_rva: int | None = None,
     kinds: tuple[str, ...] = ("rip",),
+    section: str = "",
 ) -> dict[str, Any]:
     """Map many target RVAs to the functions that reference them, in ONE pass.
 
@@ -599,7 +615,10 @@ def map_refs_to_functions(
 
     Args:
         targets: {label: rva}. Labels are free-form (usually the string itself).
+        scan_start_rva / scan_end_rva: omit either to take it from the section
+            (``.text`` by default, or ``section=``).
         kinds: same vocabulary as ``xrefs_to_rva``; "rip" is the useful one here.
+        section: scan this whole section instead.
 
     Returns:
         {
@@ -607,20 +626,35 @@ def map_refs_to_functions(
           "orphans":   [{label, from_rva}],   # reference outside any .pdata entry
           "unreferenced": [label, ...],
           "scanned_bytes": int,
+          "scan_start_rva": int, "scan_end_rva": int,
+          "section": str, "section_coverage": float,   # 1.0 = the whole section
         }
+
+    ``section_coverage`` is there so a caller can tell "nothing references these"
+    apart from "the scan only looked at part of the section".
     """
     import struct
 
     import capstone
 
     img = PEImage(binary_path)
+    scan_start_rva, scan_end_rva, section_name = _resolve_scan_range(
+        img, scan_start_rva, scan_end_rva, section)
+    full = img.section_range(section_name) if section_name else None
+    coverage = 1.0
+    if full and full[1] > full[0]:
+        coverage = round(
+            (min(scan_end_rva, full[1]) - max(scan_start_rva, full[0])) / (full[1] - full[0]), 4)
+    scan_info = {"scan_start_rva": scan_start_rva, "scan_end_rva": scan_end_rva,
+                 "section": section_name, "section_coverage": coverage}
     md = capstone.Cs(capstone.CS_ARCH_X86,
                      capstone.CS_MODE_64 if img.is_64bit else capstone.CS_MODE_32)
     md.detail = True
     data = img.read_rva(scan_start_rva, scan_end_rva - scan_start_rva)
     if data is None:
         return {"functions": [], "orphans": [], "unreferenced": list(targets),
-                "scanned_bytes": 0}
+                "scanned_bytes": 0, **scan_info}
+
 
 
     base = img.image_base
@@ -692,22 +726,86 @@ def map_refs_to_functions(
         "orphans": orphans,
         "unreferenced": sorted(name for rva, names in by_rva.items()
                                if rva not in referenced for name in names),
-
         "scanned_bytes": n,
+        **scan_info,
     }
 
 
+
+def _resolve_scan_range(
+    img: PEImage,
+    scan_start_rva: int | None,
+    scan_end_rva: int | None,
+    section: str = "",
+    default_section: str = ".text",
+) -> tuple[int, int, str]:
+    """Resolve a scan range, defaulting to a whole section, and flag partial cover.
+
+    A truncated range is the easiest way to get a confidently wrong answer out of
+    this module: scanning a third of a 240 MB ``.text`` returns an empty list that
+    is indistinguishable from "nothing references this". It has already caused a
+    false negative in practice. So:
+
+    * omitting either bound fills it from the section (``.text`` by default, or the
+      section containing the bound that *was* given);
+    * ``section=".rdata"`` asks for that section outright;
+    * a range that covers only part of its containing section is logged as a
+      warning with the percentage, so the gap is visible instead of silent.
+
+    Returns (start_rva, end_rva, section_name).
+    """
+    if section:
+        found = img.section_range(section)
+        if found is None:
+            raise ValueError(f"no section named {section!r} in this image")
+        lo, hi = found
+        return (lo if scan_start_rva is None else scan_start_rva,
+                hi if scan_end_rva is None else scan_end_rva, section)
+
+    if scan_start_rva is None or scan_end_rva is None:
+        anchor = scan_start_rva if scan_start_rva is not None else scan_end_rva
+        name = (img.section_of(anchor) if anchor is not None else None) or default_section
+        found = img.section_range(name) or img.section_range(default_section)
+        if found is None:
+            raise ValueError(
+                f"cannot default the scan range: this image has no {default_section} "
+                "section, pass scan_start_rva/scan_end_rva explicitly")
+        lo, hi = found
+        scan_start_rva = lo if scan_start_rva is None else scan_start_rva
+        scan_end_rva = hi if scan_end_rva is None else scan_end_rva
+
+    containing = img.section_of(scan_start_rva) or ""
+    full = img.section_range(containing) if containing else None
+    if full and (scan_start_rva > full[0] or scan_end_rva < full[1]):
+        span = full[1] - full[0]
+        covered = (min(scan_end_rva, full[1]) - max(scan_start_rva, full[0])) / span
+        logger.warning(
+            "scan range 0x%x-0x%x covers %.1f%% of %s (0x%x-0x%x): an incomplete "
+            "range returns fewer references, which looks identical to having none",
+            scan_start_rva, scan_end_rva, covered * 100, containing, full[0], full[1])
+    return scan_start_rva, scan_end_rva, containing
+
+
+def section_range(binary_path: str | Path, name: str = ".text") -> dict[str, Any] | None:
+    """(start/end RVA and size of a section) — use it instead of guessing bounds."""
+    found = PEImage(binary_path).section_range(name)
+    if found is None:
+        return None
+    return {"section": name, "start_rva": found[0], "end_rva": found[1],
+            "size": found[1] - found[0]}
+
+
 def xrefs_to_rva(
-
-
     binary_path: str | Path,
     target_rva: int,
-    scan_start_rva: int,
-    scan_end_rva: int,
+    scan_start_rva: int | None = None,
+    scan_end_rva: int | None = None,
     kinds: tuple[str, ...] = ("rip", "call", "jmp"),
     verify: bool = True,
     scan_gaps: bool = True,
+    section: str = "",
 ) -> list[dict[str, Any]]:
+
     """RVA-aware cross-reference scan within [scan_start_rva, scan_end_rva).
 
     Rip-relative references are found by **disassembling each ``.pdata``
@@ -732,6 +830,12 @@ def xrefs_to_rva(
     have no rip-relative reference at all.
 
     Args:
+        scan_start_rva / scan_end_rva: omit either to take it from the section
+            (``.text`` by default, or ``section=``). Passing a partial range is how
+            a scan silently under-reports: a third of a 240 MB ``.text`` returns an
+            empty list that looks exactly like "no references". Partial coverage is
+            logged as a warning.
+        section: scan this whole section instead (".rdata" for ``ptr``/``rva32``).
         verify: decode displacement-scan candidates with capstone to confirm the
             operand and instruction length. The ``.pdata`` pass always decodes.
             False is faster and noisier.
@@ -747,6 +851,9 @@ def xrefs_to_rva(
     import capstone
 
     img = PEImage(binary_path)
+    scan_start_rva, scan_end_rva, _section_name = _resolve_scan_range(
+        img, scan_start_rva, scan_end_rva, section)
+
     md = capstone.Cs(capstone.CS_ARCH_X86,
                      capstone.CS_MODE_64 if img.is_64bit else capstone.CS_MODE_32)
     md.detail = True

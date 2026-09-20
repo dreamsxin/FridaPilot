@@ -289,6 +289,8 @@ def _actual_keys(name: str, path: str) -> set[str]:
         "disassemble_rva": lambda: pe_rva.disassemble_rva(path, TEXT_RVA, 1),
         "map_refs_to_functions": lambda: pe_rva.map_refs_to_functions(
             path, {"g": TARGET_RVA}, TEXT_RVA, end),
+        "section_range": lambda: pe_rva.section_range(path, ".text"),
+
         "find_text": lambda: binary_analysis.find_text(
             path, MARKER_TEXT, encodings=("ascii",))[0].model_dump(),
         "find_strings": lambda: binary_analysis.find_strings(
