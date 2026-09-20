@@ -62,7 +62,7 @@ def crypto_scan(
             console.print(f"  {s}")
 
     if result.hex_key_candidates:
-        console.print(f"\n[bold]Hex Key Candidates:[/bold]")
+        console.print("\n[bold]Hex Key Candidates:[/bold]")
         for h in result.hex_key_candidates[:5]:
             console.print(f"  {h}")
 
@@ -141,7 +141,7 @@ def crypto_bruteforce(
     key_sizes = [int(s.strip()) for s in key_size.split(",")]
     iv_strategies = [s.strip() for s in iv_strategy.split(",")]
 
-    console.print(f"[bold]Brute-force AES key search[/bold]")
+    console.print("[bold]Brute-force AES key search[/bold]")
     console.print(f"  Binary: {binary}")
     console.print(f"  Ciphertext: {ciphertext_file} ({len(ct_data)} bytes, {encoding})")
     console.print(f"  Key sizes: {key_sizes}, Alignment: {alignment}")

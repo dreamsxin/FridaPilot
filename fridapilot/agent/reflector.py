@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from fridapilot.agent.planner import ExecutionPlan, TaskStep
+from fridapilot.agent.planner import ExecutionPlan
 from fridapilot.agent.executor import StepResult, ExecutionContext
 
 
@@ -116,9 +116,9 @@ def diagnose(
     Checks which steps failed, categorizes errors, and suggests fixes.
     """
     failed = [r for r in results if not r.success]
-    succeeded = [r for r in results if r.success]
 
     if not failed:
+
         return Diagnosis(success=True)
 
     categories: list[str] = []
@@ -181,11 +181,10 @@ async def reflect_and_fix(
 
 
 def _has_litellm() -> bool:
-    try:
-        import litellm
-        return True
-    except ImportError:
-        return False
+    import importlib.util
+
+    return importlib.util.find_spec("litellm") is not None
+
 
 
 REFLECTOR_PROMPT = """\

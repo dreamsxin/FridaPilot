@@ -14,7 +14,6 @@ from fridapilot.models.schemas import (
     ExportInfo,
     ModuleInfo,
     ProcessInfo,
-    RuntimeType,
 )
 
 

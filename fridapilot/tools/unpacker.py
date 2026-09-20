@@ -137,11 +137,10 @@ def detect_packer(filepath: str | Path) -> PackerInfo:
         for s in high_ent:
             result.evidence.append(f"Section '{s['name']}' entropy={s['entropy']} (> 7.0)")
 
-    # Import table heuristic: very few imports suggest packing
+    # Import table heuristic: very few DLL references suggest packing
     try:
-        import_strings = [b"kernel32.dll", b"ntdll.dll", b"msvcrt.dll"]
-        found_imports = sum(1 for s in import_strings if s.lower() in data.lower())
         total_dll_refs = data.lower().count(b".dll")
+
         if total_dll_refs <= 3 and not result.packed:
             result.packed = True
             result.packer_name = result.packer_name if result.packer_name != "unknown" else "unknown (minimal imports)"
@@ -222,7 +221,6 @@ def dump_process_memory(
     Returns:
         UnpackResult with dump file path.
     """
-    import frida
     from fridapilot.models.schemas import DeviceType
     from fridapilot.tools.recon import get_device
 

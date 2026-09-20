@@ -20,7 +20,6 @@ import struct
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 
 # AES S-Box (standard, used for fingerprinting)

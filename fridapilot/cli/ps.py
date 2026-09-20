@@ -1,6 +1,5 @@
 """fp ps - List processes on the target device."""
 
-from typing import Optional
 
 import typer
 from rich.console import Console

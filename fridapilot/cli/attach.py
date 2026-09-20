@@ -1,6 +1,5 @@
 """fp attach / spawn / detach - Session lifecycle commands."""
 
-from typing import Optional
 
 import typer
 from rich.console import Console

@@ -13,7 +13,6 @@ No LLM dependency.
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
@@ -618,7 +617,7 @@ class DebugSessionManager:
             try:
                 sess.connect()
                 results[name] = True
-            except Exception as e:
+            except Exception:
                 results[name] = False
         return results
 

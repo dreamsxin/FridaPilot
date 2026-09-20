@@ -89,16 +89,16 @@ def auto_cmd(
 
     if result.success:
         if result.method == "none":
-            console.print(f"[green]Binary is not packed.[/green] No unpacking needed.")
+            console.print("[green]Binary is not packed.[/green] No unpacking needed.")
         else:
-            console.print(f"[bold green]Unpacked successfully![/bold green]")
+            console.print("[bold green]Unpacked successfully![/bold green]")
             console.print(f"  Method: {result.method}")
             console.print(f"  Output: {result.output_path}")
     else:
-        console.print(f"[bold red]Unpacking failed.[/bold red]")
+        console.print("[bold red]Unpacking failed.[/bold red]")
         console.print(f"  {result.error}")
         if result.packer_info and result.packer_info.packed:
-            console.print(f"\n[yellow]Suggestion:[/yellow] Run the packed binary, then use:")
+            console.print("\n[yellow]Suggestion:[/yellow] Run the packed binary, then use:")
             console.print(f"  fp unpack dump --target {binary}")
 
 
@@ -123,9 +123,9 @@ def dump_cmd(
     result = dump_process_memory(tgt, output_path=output or None, device_type=device)
 
     if result.success:
-        console.print(f"[bold green]Memory dump saved![/bold green]")
+        console.print("[bold green]Memory dump saved![/bold green]")
         console.print(f"  Output: {result.output_path}")
-        console.print(f"\n[dim]Next: analyze the dump with[/dim]")
+        console.print("\n[dim]Next: analyze the dump with[/dim]")
         console.print(f"  fp binary analyze {result.output_path}")
     else:
         console.print(f"[bold red]Dump failed:[/bold red] {result.error}")

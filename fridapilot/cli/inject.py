@@ -35,7 +35,7 @@ def inject_cmd(
 
     # Inject
     inject(session, script_source)
-    console.print(f"[green]Script injected.[/green]")
+    console.print("[green]Script injected.[/green]")
 
     # Collect messages
     try:

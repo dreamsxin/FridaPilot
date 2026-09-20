@@ -42,7 +42,7 @@ def _register_tools() -> None:
     if TOOL_REGISTRY:
         return
 
-    from fridapilot.tools import recon, injector, observer, script_forge, bypass, crypto_reverse
+    from fridapilot.tools import recon, injector, script_forge, bypass, crypto_reverse
     from fridapilot.tools import binary_analysis
     from fridapilot.tools import pe_rva
     from fridapilot.tools import unpacker as unpacker_mod

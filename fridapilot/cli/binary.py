@@ -33,7 +33,6 @@ def analyze_pe_cmd(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """Analyze PE binary: headers, sections, imports, exports, debug info."""
-    import json as json_mod
     from fridapilot.tools.binary_analysis import analyze_pe
 
     result = analyze_pe(binary)
@@ -85,7 +84,7 @@ def analyze_pe_cmd(
             console.print(f"  ... and {len(result.exports) - 20} more")
 
     if result.debug_info:
-        console.print(f"\n[bold]Debug Info:[/bold]")
+        console.print("\n[bold]Debug Info:[/bold]")
         for k, v in result.debug_info.items():
             console.print(f"  {k}: {v}")
 
@@ -96,7 +95,6 @@ def analyze_elf_cmd(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """Analyze ELF binary: headers, sections, symbols, dynamic libraries."""
-    import json as json_mod
     from fridapilot.tools.binary_analysis import analyze_elf
 
     result = analyze_elf(binary)
@@ -127,7 +125,7 @@ def analyze_elf_cmd(
         console.print(sec_table)
 
     if result.dynamic_libs:
-        console.print(f"\n[bold]Dynamic Libraries:[/bold]")
+        console.print("\n[bold]Dynamic Libraries:[/bold]")
         for lib in result.dynamic_libs:
             console.print(f"  {lib}")
 
@@ -147,7 +145,6 @@ def disassemble_cmd(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """Disassemble instructions at a given file offset."""
-    import json as json_mod
     from fridapilot.tools.binary_analysis import disassemble
 
     addr = int(address, 0)  # supports 0x prefix
@@ -172,7 +169,6 @@ def find_strings_cmd(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """Extract strings from a binary file (ASCII, UTF-16LE, UTF-8)."""
-    import json as json_mod
     from fridapilot.tools.binary_analysis import find_strings
 
     results = find_strings(binary, min_len=min_len, encoding=encoding, limit=limit * 5)
@@ -200,7 +196,6 @@ def search_bytes_cmd(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """Search for a byte pattern in a binary (supports ?? wildcards)."""
-    import json as json_mod
     from fridapilot.tools.binary_analysis import search_bytes
 
     results = search_bytes(binary, pattern, limit=limit)
@@ -223,7 +218,6 @@ def xrefs_cmd(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """Find cross-references (CALL/JMP) to a target address."""
-    import json as json_mod
     from fridapilot.tools.binary_analysis import xrefs_to
 
     addr = int(address, 0)
@@ -248,7 +242,6 @@ def analyze_go_cmd(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """Analyze a Go-compiled binary: version, packages, functions, source paths."""
-    import json as json_mod
     from fridapilot.tools.binary_analysis import analyze_go_binary
 
     result = analyze_go_binary(binary)
@@ -298,7 +291,6 @@ def analyze_cmd(
     Automatically detects binary type and runs all relevant analysis tools,
     producing a combined report. This is the most common RE workflow.
     """
-    import json as json_mod
     from pathlib import Path as _Path
 
     filepath = _Path(binary)
@@ -443,7 +435,6 @@ def disasm_rva_cmd(
     the file offset (e.g. chrome.dll). Rip-relative data references and call/jmp
     targets are resolved to RVA and tagged with any supplied symbol names.
     """
-    import json as json_mod
     from fridapilot.tools.pe_rva import disassemble_rva
 
     sym_map: dict[int, str] = {}
@@ -478,7 +469,6 @@ def find_string_rva_cmd(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """Locate exact strings and report their RVA (for subsequent xrefs/disasm)."""
-    import json as json_mod
     from fridapilot.tools.pe_rva import find_string_rvas
 
     needle_list = [n for n in needles.split(",") if n]
@@ -518,7 +508,6 @@ def field_refs_cmd(
       fp binary field-refs chrome.dll -o 0xB0 --kind read --start-rva 0xb029000 \\
           --end-rva 0xb02a000        # must include the known read site
     """
-    import json as json_mod
 
     from fridapilot.tools.pe_rva import field_refs, function_bounds
 
@@ -577,7 +566,6 @@ def map_refs_cmd(
     Example: map every custom switch of a patched Chromium to its consuming function:
       fp binary map-refs chrome.dll --prefix np- --min-labels 2
     """
-    import json as json_mod
     import re
 
     from fridapilot.tools.pe_rva import PEImage, map_refs_to_functions
@@ -698,7 +686,6 @@ def func_bounds_cmd(
       fp binary func-bounds chrome.dll --rva 0xd6ba5db
       fp binary disasm-rva chrome.dll --rva <begin_rva> -n 400
     """
-    import json as json_mod
     from fridapilot.tools.pe_rva import function_bounds
 
     res = function_bounds(binary, int(rva, 0))
@@ -754,7 +741,6 @@ def xrefs_rva_cmd(
       fp binary xrefs-rva chrome.dll --target 0xfb3dfc0 --start 0xf545000 \\
           --end 0x11394000 --kinds ptr
     """
-    import json as json_mod
     from fridapilot.tools.pe_rva import xrefs_to_rva
 
     kind_tuple = tuple(k.strip() for k in kinds.split(",") if k.strip())
