@@ -729,14 +729,22 @@ def xrefs_rva_cmd(
     ),
     no_verify: bool = typer.Option(
         False, "--no-verify",
-        help="Skip per-candidate capstone verification (faster, slightly noisier).",
+        help="Skip per-candidate capstone verification in the gap scan "
+             "(faster, slightly noisier).",
+    ),
+    pdata_only: bool = typer.Option(
+        False, "--pdata-only",
+        help="Only scan code covered by .pdata RUNTIME_FUNCTIONs. Fewer false "
+             "positives when the range spans data, but misses leaf functions.",
     ),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """RVA-aware xref scan: rip-relative data refs + direct call/jmp to a target RVA.
 
-    Byte-pattern scanning with capstone verification — linear disassembly of a large
-    .text desynchronises on embedded data and silently misses most references.
+    Rip references come from disassembling each .pdata function, plus an
+    opcode-agnostic displacement scan of the ranges .pdata does not cover. A single
+    linear sweep of a large .text desynchronises on embedded data and silently
+    misses most references.
 
     Examples:
       # code referencing a config field string
@@ -751,7 +759,9 @@ def xrefs_rva_cmd(
 
     kind_tuple = tuple(k.strip() for k in kinds.split(",") if k.strip())
     results = xrefs_to_rva(binary, int(target, 0), int(start, 0), int(end, 0),
-                           kinds=kind_tuple, verify=not no_verify)
+                           kinds=kind_tuple, verify=not no_verify,
+                           scan_gaps=not pdata_only)
+
 
     if json_output:
         _emit_json(results)
