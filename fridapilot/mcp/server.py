@@ -3,10 +3,16 @@
 Allows Claude Desktop, Cursor, and other MCP-compatible agents to call
 FridaPilot's Tool Layer directly.
 
-Production-grade features:
-- Path whitelist (FRIDAPILOT_ALLOWED_DIRS env var)
+Shape of this module: each tool is a thin typed wrapper decorated with
+`@mcp.tool()`, so MCPServer derives the JSON schema from the annotations and the
+description from the docstring — there is no hand-written schema to drift. The
+wrappers all funnel into `_dispatch`, which enforces the path whitelist, writes
+the audit entry and wraps the outcome; the actual work lives in `_handle_tool`.
+
+Features:
+- Path whitelist (FRIDAPILOT_ALLOWED_DIRS env var) on every path argument
 - Audit logging of all tool calls
-- Standardized error response format
+- Standardized response: {success, data | error, tool, duration}
 - Pagination for enumeration tools
 """
 
@@ -20,12 +26,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from mcp.server import MCPServer
 
-from mcp.server import Server
-from mcp.types import Tool, TextContent
-
-
+from fridapilot import __version__
 from fridapilot.models.schemas import DeviceType
+
+
 
 logger = logging.getLogger("fridapilot.mcp")
 _audit_logger = logging.getLogger("fridapilot.audit")
@@ -77,549 +83,414 @@ def _audit_log(tool_name: str, arguments: dict[str, Any], result: Any = None, er
         entry["error"] = error[:200]
     _audit_logger.info(json.dumps(entry, default=str))
 
-server = Server("fridapilot")
-
-
-# ── Tool definitions ──────────────────────────────────────────
-
-TOOLS = [
-    Tool(
-        name="frida_list_processes",
-        description="List running processes on the target device.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "device": {"type": "string", "enum": ["local", "usb", "remote"], "default": "local"},
-                "host": {"type": "string", "default": ""},
-            },
-        },
-    ),
-    Tool(
-        name="frida_attach",
-        description="Attach to a running process by name or PID. Returns session info.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "device": {"type": "string", "default": "local"},
-                "host": {"type": "string", "default": ""},
-            },
-            "required": ["target"],
-        },
-    ),
-    Tool(
-        name="frida_spawn",
-        description="Spawn an application and attach. Returns session info. Call frida_inject_script next.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "package": {"type": "string", "description": "Package name or executable path"},
-                "device": {"type": "string", "default": "local"},
-                "host": {"type": "string", "default": ""},
-            },
-            "required": ["package"],
-        },
-    ),
-    Tool(
-        name="frida_detach",
-        description="Detach from the current session and unload all scripts.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID of active session"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target"],
-        },
-    ),
-    Tool(
-        name="frida_enumerate_modules",
-        description="Enumerate loaded modules in a target process. Supports pagination.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "device": {"type": "string", "default": "local"},
-                "offset": {"type": "integer", "default": 0, "description": "Pagination offset"},
-                "limit": {"type": "integer", "default": 100, "description": "Max results per page"},
-            },
-            "required": ["target"],
-        },
-    ),
-    Tool(
-        name="frida_enumerate_classes",
-        description="Enumerate Java/ObjC classes in a target process. Supports pagination.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "filter_prefix": {"type": "string", "default": "", "description": "Filter by class name prefix"},
-                "device": {"type": "string", "default": "local"},
-                "offset": {"type": "integer", "default": 0, "description": "Pagination offset"},
-                "limit": {"type": "integer", "default": 100, "description": "Max results per page"},
-            },
-            "required": ["target"],
-        },
-    ),
-    Tool(
-        name="frida_enumerate_methods",
-        description="Enumerate methods of a class in a target process. Supports pagination.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "class_name": {"type": "string", "description": "Fully qualified class name"},
-                "device": {"type": "string", "default": "local"},
-                "offset": {"type": "integer", "default": 0, "description": "Pagination offset"},
-                "limit": {"type": "integer", "default": 100, "description": "Max results per page"},
-            },
-            "required": ["target", "class_name"],
-        },
-    ),
-    Tool(
-        name="frida_enumerate_exports",
-        description="Enumerate exports of a module in a target process. Supports pagination.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "module_name": {"type": "string", "description": "Module name"},
-                "device": {"type": "string", "default": "local"},
-                "offset": {"type": "integer", "default": 0, "description": "Pagination offset"},
-                "limit": {"type": "integer", "default": 100, "description": "Max results per page"},
-            },
-            "required": ["target", "module_name"],
-        },
-    ),
-    Tool(
-        name="frida_inject_script",
-        description="Inject a Frida script into a target process and collect messages.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "script": {"type": "string", "description": "Frida JavaScript source code"},
-                "timeout": {"type": "integer", "default": 5, "description": "Seconds to collect messages"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target", "script"],
-        },
-    ),
-    Tool(
-        name="frida_generate_script",
-        description="Generate a Frida script from a built-in template.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "template": {"type": "string", "description": "Template name: java-hook, objc-hook, native-hook, ssl-bypass, crypto-monitor, electron-ipc, node-hook"},
-                "class_name": {"type": "string", "default": ""},
-                "method_name": {"type": "string", "default": ""},
-                "module_name": {"type": "string", "default": ""},
-            },
-            "required": ["template"],
-        },
-    ),
-    Tool(
-        name="frida_bypass_ssl",
-        description="Inject SSL pinning bypass into a target process.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target"],
-        },
-    ),
-    Tool(
-        name="frida_crypto_scan",
-        description="Scan a PE/ELF binary for crypto indicators (S-Box, imports, protection level L0-L5).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to the binary file"},
-            },
-            "required": ["binary_path"],
-        },
-    ),
-    Tool(
-        name="frida_crypto_hook_bcrypt",
-        description="Hook Windows BCrypt APIs in a target process to capture encryption keys at runtime.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "timeout": {"type": "integer", "default": 10, "description": "Seconds to monitor"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target"],
-        },
-    ),
-
-    # ── Binary Analysis Tools (static, no running process needed) ──
-
-    Tool(
-        name="binary_analyze_pe",
-        description="Analyze a PE binary (.exe/.dll/.sys): headers, sections, imports, exports, debug info.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to PE file"},
-            },
-            "required": ["binary_path"],
-        },
-    ),
-    Tool(
-        name="binary_analyze_elf",
-        description="Analyze an ELF binary: headers, sections, symbols, dynamic libraries.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to ELF file"},
-            },
-            "required": ["binary_path"],
-        },
-    ),
-    Tool(
-        name="binary_disassemble",
-        description="Disassemble instructions at a given file offset. Auto-detects architecture.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to binary file"},
-                "address": {"type": "integer", "description": "File offset to disassemble from"},
-                "count": {"type": "integer", "default": 20, "description": "Number of instructions"},
-                "arch": {"type": "string", "default": "auto", "description": "Architecture: auto, x86, x64, arm, arm64"},
-            },
-            "required": ["binary_path", "address"],
-        },
-    ),
-    Tool(
-        name="binary_find_strings",
-        description="Extract strings from a binary (ASCII, UTF-16LE, UTF-8). Supports filtering.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to binary file"},
-                "min_len": {"type": "integer", "default": 4, "description": "Minimum string length"},
-                "encoding": {"type": "string", "default": "all", "description": "Encoding: ascii, utf16le, utf8, all"},
-                "limit": {"type": "integer", "default": 200, "description": "Max strings to return"},
-                "filter": {"type": "string", "default": "", "description": "Filter strings containing this text"},
-            },
-            "required": ["binary_path"],
-        },
-    ),
-    Tool(
-        name="binary_search_bytes",
-        description="Search for a byte pattern in a binary. Supports ?? wildcards.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to binary file"},
-                "pattern": {"type": "string", "description": "Hex pattern, e.g. '4883ec20' or '48 8b ?? 48'"},
-                "limit": {"type": "integer", "default": 50, "description": "Max matches"},
-            },
-            "required": ["binary_path", "pattern"],
-        },
-    ),
-    Tool(
-        name="binary_xrefs",
-        description="Find cross-references (CALL/JMP) to a target address in a binary.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to binary file"},
-                "target_address": {"type": "integer", "description": "Target address (file offset)"},
-                "start": {"type": "integer", "default": 0, "description": "Search range start"},
-                "end": {"type": "integer", "default": 0, "description": "Search range end (0 = entire file)"},
-            },
-            "required": ["binary_path", "target_address"],
-        },
-    ),
-    Tool(
-        name="binary_analyze_go",
-        description="Analyze a Go-compiled binary: version, packages, functions, source paths.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to Go binary"},
-            },
-            "required": ["binary_path"],
-        },
-    ),
-
-    # ── Advanced Frida Hook Tools ──
-
-    Tool(
-        name="frida_hook_function",
-        description="Hook a native function by name or address. Auto-generates Interceptor script with argument/return logging.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "module": {"type": "string", "description": "Module name (e.g. 'bcrypt.dll')"},
-                "function": {"type": "string", "description": "Export name or hex address"},
-                "log_args": {"type": "boolean", "default": True, "description": "Log function arguments"},
-                "log_retval": {"type": "boolean", "default": True, "description": "Log return value"},
-                "log_backtrace": {"type": "boolean", "default": False, "description": "Log call backtrace"},
-                "timeout": {"type": "integer", "default": 10, "description": "Seconds to monitor"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target", "module", "function"],
-        },
-    ),
-    Tool(
-        name="frida_hook_batch",
-        description="Hook multiple functions at once. Returns aggregated messages from all hooks.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "hooks": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "module": {"type": "string"},
-                            "function": {"type": "string"},
-                        },
-                        "required": ["module", "function"],
-                    },
-                    "description": "List of {module, function} pairs to hook",
-                },
-                "timeout": {"type": "integer", "default": 10},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target", "hooks"],
-        },
-    ),
-
-    # ── Memory Tools ──
-
-    Tool(
-        name="frida_read_memory",
-        description="Read bytes from a memory address in a target process.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "address": {"type": "string", "description": "Memory address (hex string like '0x7ff...')"},
-                "size": {"type": "integer", "description": "Number of bytes to read"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target", "address", "size"],
-        },
-    ),
-    Tool(
-        name="frida_write_memory",
-        description="Write bytes to a memory address in a target process. Use with caution.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "address": {"type": "string", "description": "Memory address (hex string)"},
-                "data": {"type": "string", "description": "Hex string of bytes to write"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target", "address", "data"],
-        },
-    ),
-    Tool(
-        name="frida_search_memory",
-        description="Search for a byte pattern in a target process's memory.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "pattern": {"type": "string", "description": "Hex pattern to search for"},
-                "module": {"type": "string", "default": "", "description": "Limit search to this module"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target", "pattern"],
-        },
-    ),
-    Tool(
-        name="frida_call_function",
-        description="Call a native function in the target process with specified arguments.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "Process name or PID"},
-                "module": {"type": "string", "description": "Module name"},
-                "function": {"type": "string", "description": "Export name"},
-                "args": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Arguments as strings (numbers or hex)"},
-                "device": {"type": "string", "default": "local"},
-            },
-            "required": ["target", "module", "function"],
-        },
-    ),
-
-    # ── RVA-aware PE analysis (ImageBase-correct; for large DLLs) ──
-    Tool(
-        name="binary_find_string_rva",
-        description="Locate exact strings in a PE and report their RVA and file offset. "
-                    "Start here: the RVA feeds binary_xrefs_rva.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to the PE file"},
-                "needles": {"type": "array", "items": {"type": "string"},
-                            "description": "Exact strings to locate"},
-                "encoding": {"type": "string", "default": "ascii",
-                             "description": "ascii or utf16le"},
-            },
-            "required": ["binary_path", "needles"],
-        },
-    ),
-    Tool(
-        name="binary_xrefs_rva",
-        description="Cross-references to an RVA: rip-relative data refs plus direct call/jmp. "
-                    "Cost scales with the scanned range - narrow it with binary_func_bounds.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to the PE file"},
-                "target_rva": {"type": "integer", "description": "RVA to find references to"},
-                "scan_start_rva": {"type": "integer", "description": "Scan range start RVA"},
-                "scan_end_rva": {"type": "integer", "description": "Scan range end RVA"},
-                "kinds": {"type": "array", "items": {"type": "string"},
-                          "default": ["rip", "call", "jmp"],
-                          "description": "rip, call, jmp, imm64, ptr, rva32. Use ptr on .rdata "
-                                         "when a string lives in a const char* table."},
-                "pdata_only": {"type": "boolean", "default": False,
-                               "description": "Only scan .pdata-covered code (fewer false "
-                                              "positives, misses leaf functions)"},
-            },
-            "required": ["binary_path", "target_rva", "scan_start_rva", "scan_end_rva"],
-        },
-    ),
-    Tool(
-        name="binary_func_bounds",
-        description="Exact function bounds for an RVA from the x64 .pdata table. "
-                    "Null when the RVA has no RUNTIME_FUNCTION (leaf function or 32-bit image).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to the PE file"},
-                "rva": {"type": "integer", "description": "Any RVA inside the function"},
-            },
-            "required": ["binary_path", "rva"],
-        },
-    ),
-    Tool(
-        name="binary_disasm_rva",
-        description="RVA-aware disassembly: ImageBase-correct addressing with rip-relative and "
-                    "call targets resolved to RVAs.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to the PE file"},
-                "rva": {"type": "integer", "description": "Start RVA, not a file offset"},
-                "count": {"type": "integer", "default": 40,
-                          "description": "Number of instructions"},
-            },
-            "required": ["binary_path", "rva"],
-        },
-    ),
-    Tool(
-        name="binary_field_refs",
-        description="Find reads/writes of a struct field at [reg+offset] - answers 'who touches "
-                    "this->field_ at +0xB0?'. Defaults to scanning .text.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to the PE file (x64)"},
-                "offset": {"type": "integer", "description": "Struct field offset, e.g. 176"},
-                "scan_start_rva": {"type": "integer", "description": "Scan start RVA (optional)"},
-                "scan_end_rva": {"type": "integer", "description": "Scan end RVA (optional)"},
-                "kind": {"type": "string", "default": "both",
-                         "description": "read, write or both"},
-            },
-            "required": ["binary_path", "offset"],
-        },
-    ),
-
-    # ── Packers ──
-    Tool(
-        name="unpack_detect",
-        description="Detect whether a binary is packed and identify the packer "
-                    "(UPX/VMProtect/Themida/ASPack), with section entropy as evidence.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to the PE file"},
-            },
-            "required": ["binary_path"],
-        },
-    ),
-    Tool(
-        name="unpack_auto",
-        description="Unpack pipeline: detect the packer, try UPX, report what is needed next. "
-                    "Non-UPX packers need a runtime memory dump instead.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "binary_path": {"type": "string", "description": "Path to the packed binary"},
-                "output_path": {"type": "string", "default": "",
-                                "description": "Where to write the unpacked file"},
-            },
-            "required": ["binary_path"],
-        },
-    ),
-
-    # ── Android APK / DEX (offline, no device needed) ──
-    Tool(
-        name="apk_analyze",
-        description="Analyze an APK: manifest (package/version/SDK/permissions/components), "
-                    "native libs, dex count, signing info and protection indicators.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "apk_path": {"type": "string", "description": "Path to the .apk file"},
-            },
-            "required": ["apk_path"],
-        },
-    ),
-    Tool(
-        name="apk_analyze_dex",
-        description="Analyze a DEX file: header, class/method/string counts, class names and a "
-                    "sample of strings.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "dex_path": {"type": "string", "description": "Path to the .dex file"},
-            },
-            "required": ["dex_path"],
-        },
-    ),
-    Tool(
-        name="apk_protections",
-        description="Root / SSL-pinning / Frida / emulator detection and packer indicators in an "
-                    "APK, each with the matching string as evidence. Run before spawning the app.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "apk_path": {"type": "string", "description": "Path to the .apk file"},
-            },
-            "required": ["apk_path"],
-        },
-    ),
-]
+mcp = MCPServer(name="fridapilot", version=__version__)
 
 # Argument names that carry a filesystem path; every one of them goes through the
 # FRIDAPILOT_ALLOWED_DIRS whitelist before the tool runs.
 PATH_ARGUMENTS = ("binary_path", "apk_path", "dex_path", "filepath", "output_path")
 
 
+def _dispatch(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Validate paths, run the tool, wrap the outcome and write the audit entry.
 
-# ── Tool handlers ─────────────────────────────────────────────
+    Every tool below is a thin typed wrapper around this: the MCP schema comes from
+    the wrapper's annotations (no hand-written JSON), and the work happens in
+    _handle_tool. Errors are returned as data rather than raised, because an
+    exception escaping a tool surfaces to the client as an opaque
+    UnexpectedToolError with the cause stripped.
+    """
+    start = _time.time()
+    try:
+        for key in PATH_ARGUMENTS:
+            value = arguments.get(key)
+            if isinstance(value, str) and value:
+                _check_path_allowed(value)
+        result = _handle_tool(name, arguments)
+        _audit_log(name, arguments)
+        return {"success": True, "data": result,
+                "duration": round(_time.time() - start, 3)}
+    except Exception as exc:
+        # A missing file or a bad RVA is routine here; log it without a traceback
+        # and keep the detail in the returned envelope.
+        logger.warning("Tool %s failed: %s", name, exc)
+        logger.debug("Tool %s traceback", name, exc_info=True)
+        _audit_log(name, arguments, error=str(exc))
+        return {"success": False, "error": str(exc), "tool": name,
+                "duration": round(_time.time() - start, 3)}
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    return TOOLS
 
+
+# ── Tools ─────────────────────────────────────────────────────
+# Signatures are the schema: MCPServer derives inputSchema from the annotations and
+# the description from the docstring, so a tool cannot drift from its declaration.
+
+@mcp.tool()
+def frida_list_processes(
+    device: str = 'local', host: str = '',
+) -> dict[str, Any]:
+    """List running processes on the target device."""
+    return _dispatch("frida_list_processes", {"device": device, "host": host})
+
+
+@mcp.tool()
+def frida_attach(
+    target: str, device: str = 'local', host: str = '',
+) -> dict[str, Any]:
+    """Attach to a running process by name or PID. Returns session info."""
+    return _dispatch("frida_attach", {"target": target, "device": device, "host": host})
+
+
+@mcp.tool()
+def frida_spawn(
+    package: str, device: str = 'local', host: str = '',
+) -> dict[str, Any]:
+    """Spawn an application and attach. Returns session info. Call frida_inject_script
+    next."""
+    return _dispatch("frida_spawn", {"package": package, "device": device, "host": host})
+
+
+@mcp.tool()
+def frida_detach(
+    target: str, device: str = 'local',
+) -> dict[str, Any]:
+    """Detach from the current session and unload all scripts."""
+    return _dispatch("frida_detach", {"target": target, "device": device})
+
+
+@mcp.tool()
+def frida_enumerate_modules(
+    target: str, device: str = 'local', offset: int = 0, limit: int = 100,
+) -> dict[str, Any]:
+    """Enumerate loaded modules in a target process. Supports pagination."""
+    return _dispatch("frida_enumerate_modules", {
+        "target": target, "device": device, "offset": offset, "limit": limit,
+    })
+
+
+@mcp.tool()
+def frida_enumerate_classes(
+    target: str, filter_prefix: str = '', device: str = 'local', offset: int = 0,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Enumerate Java/ObjC classes in a target process. Supports pagination."""
+    return _dispatch("frida_enumerate_classes", {
+        "target": target, "filter_prefix": filter_prefix, "device": device,
+        "offset": offset, "limit": limit,
+    })
+
+
+@mcp.tool()
+def frida_enumerate_methods(
+    target: str, class_name: str, device: str = 'local', offset: int = 0, limit: int = 100,
+) -> dict[str, Any]:
+    """Enumerate methods of a class in a target process. Supports pagination."""
+    return _dispatch("frida_enumerate_methods", {
+        "target": target, "class_name": class_name, "device": device, "offset": offset,
+        "limit": limit,
+    })
+
+
+@mcp.tool()
+def frida_enumerate_exports(
+    target: str, module_name: str, device: str = 'local', offset: int = 0, limit: int = 100,
+) -> dict[str, Any]:
+    """Enumerate exports of a module in a target process. Supports pagination."""
+    return _dispatch("frida_enumerate_exports", {
+        "target": target, "module_name": module_name, "device": device, "offset": offset,
+        "limit": limit,
+    })
+
+
+@mcp.tool()
+def frida_inject_script(
+    target: str, script: str, timeout: int = 5, device: str = 'local',
+) -> dict[str, Any]:
+    """Inject a Frida script into a target process and collect messages."""
+    return _dispatch("frida_inject_script", {
+        "target": target, "script": script, "timeout": timeout, "device": device,
+    })
+
+
+@mcp.tool()
+def frida_generate_script(
+    template: str, class_name: str = '', method_name: str = '', module_name: str = '',
+) -> dict[str, Any]:
+    """Generate a Frida script from a built-in template."""
+    return _dispatch("frida_generate_script", {
+        "template": template, "class_name": class_name, "method_name": method_name,
+        "module_name": module_name,
+    })
+
+
+@mcp.tool()
+def frida_bypass_ssl(
+    target: str, device: str = 'local',
+) -> dict[str, Any]:
+    """Inject SSL pinning bypass into a target process."""
+    return _dispatch("frida_bypass_ssl", {"target": target, "device": device})
+
+
+@mcp.tool()
+def frida_crypto_scan(
+    binary_path: str,
+) -> dict[str, Any]:
+    """Scan a PE/ELF binary for crypto indicators (S-Box, imports, protection level
+    L0-L5)."""
+    return _dispatch("frida_crypto_scan", {"binary_path": binary_path})
+
+
+@mcp.tool()
+def frida_crypto_hook_bcrypt(
+    target: str, timeout: int = 10, device: str = 'local',
+) -> dict[str, Any]:
+    """Hook Windows BCrypt APIs in a target process to capture encryption keys at
+    runtime."""
+    return _dispatch("frida_crypto_hook_bcrypt", {
+        "target": target, "timeout": timeout, "device": device,
+    })
+
+
+@mcp.tool()
+def binary_analyze_pe(
+    binary_path: str,
+) -> dict[str, Any]:
+    """Analyze a PE binary (.exe/.dll/.sys): headers, sections, imports, exports, debug
+    info."""
+    return _dispatch("binary_analyze_pe", {"binary_path": binary_path})
+
+
+@mcp.tool()
+def binary_analyze_elf(
+    binary_path: str,
+) -> dict[str, Any]:
+    """Analyze an ELF binary: headers, sections, symbols, dynamic libraries."""
+    return _dispatch("binary_analyze_elf", {"binary_path": binary_path})
+
+
+@mcp.tool()
+def binary_disassemble(
+    binary_path: str, address: int, count: int = 20, arch: str = 'auto',
+) -> dict[str, Any]:
+    """Disassemble instructions at a given file offset. Auto-detects architecture."""
+    return _dispatch("binary_disassemble", {
+        "binary_path": binary_path, "address": address, "count": count, "arch": arch,
+    })
+
+
+@mcp.tool()
+def binary_find_strings(
+    binary_path: str, min_len: int = 4, encoding: str = 'all', limit: int = 200,
+    filter: str = '',
+) -> dict[str, Any]:
+    """Extract strings from a binary (ASCII, UTF-16LE, UTF-8). Supports filtering."""
+    return _dispatch("binary_find_strings", {
+        "binary_path": binary_path, "min_len": min_len, "encoding": encoding,
+        "limit": limit, "filter": filter,
+    })
+
+
+@mcp.tool()
+def binary_search_bytes(
+    binary_path: str, pattern: str, limit: int = 50,
+) -> dict[str, Any]:
+    """Search for a byte pattern in a binary. Supports ?? wildcards."""
+    return _dispatch("binary_search_bytes", {
+        "binary_path": binary_path, "pattern": pattern, "limit": limit,
+    })
+
+
+@mcp.tool()
+def binary_xrefs(
+    binary_path: str, target_address: int, start: int = 0, end: int = 0,
+) -> dict[str, Any]:
+    """Find cross-references (CALL/JMP) to a target address in a binary."""
+    return _dispatch("binary_xrefs", {
+        "binary_path": binary_path, "target_address": target_address, "start": start,
+        "end": end,
+    })
+
+
+@mcp.tool()
+def binary_analyze_go(
+    binary_path: str,
+) -> dict[str, Any]:
+    """Analyze a Go-compiled binary: version, packages, functions, source paths."""
+    return _dispatch("binary_analyze_go", {"binary_path": binary_path})
+
+
+@mcp.tool()
+def frida_hook_function(
+    target: str, module: str, function: str, log_args: bool = True, log_retval: bool = True,
+    log_backtrace: bool = False, timeout: int = 10, device: str = 'local',
+) -> dict[str, Any]:
+    """Hook a native function by name or address. Auto-generates Interceptor script with
+    argument/return logging."""
+    return _dispatch("frida_hook_function", {
+        "target": target, "module": module, "function": function, "log_args": log_args,
+        "log_retval": log_retval, "log_backtrace": log_backtrace, "timeout": timeout,
+        "device": device,
+    })
+
+
+@mcp.tool()
+def frida_hook_batch(
+    target: str, hooks: list[Any], timeout: int = 10, device: str = 'local',
+) -> dict[str, Any]:
+    """Hook multiple functions at once. Returns aggregated messages from all hooks."""
+    return _dispatch("frida_hook_batch", {
+        "target": target, "hooks": hooks, "timeout": timeout, "device": device,
+    })
+
+
+@mcp.tool()
+def frida_read_memory(
+    target: str, address: str, size: int, device: str = 'local',
+) -> dict[str, Any]:
+    """Read bytes from a memory address in a target process."""
+    return _dispatch("frida_read_memory", {
+        "target": target, "address": address, "size": size, "device": device,
+    })
+
+
+@mcp.tool()
+def frida_write_memory(
+    target: str, address: str, data: str, device: str = 'local',
+) -> dict[str, Any]:
+    """Write bytes to a memory address in a target process. Use with caution."""
+    return _dispatch("frida_write_memory", {
+        "target": target, "address": address, "data": data, "device": device,
+    })
+
+
+@mcp.tool()
+def frida_search_memory(
+    target: str, pattern: str, module: str = '', device: str = 'local',
+) -> dict[str, Any]:
+    """Search for a byte pattern in a target process's memory."""
+    return _dispatch("frida_search_memory", {
+        "target": target, "pattern": pattern, "module": module, "device": device,
+    })
+
+
+@mcp.tool()
+def frida_call_function(
+    target: str, module: str, function: str, args: list[str] = [], device: str = 'local',
+) -> dict[str, Any]:
+    """Call a native function in the target process with specified arguments."""
+    return _dispatch("frida_call_function", {
+        "target": target, "module": module, "function": function, "args": args,
+        "device": device,
+    })
+
+
+@mcp.tool()
+def binary_find_string_rva(
+    binary_path: str, needles: list[str], encoding: str = 'ascii',
+) -> dict[str, Any]:
+    """Locate exact strings in a PE and report their RVA and file offset. Start here:
+    the RVA feeds binary_xrefs_rva."""
+    return _dispatch("binary_find_string_rva", {
+        "binary_path": binary_path, "needles": needles, "encoding": encoding,
+    })
+
+
+@mcp.tool()
+def binary_xrefs_rva(
+    binary_path: str, target_rva: int, scan_start_rva: int, scan_end_rva: int,
+    kinds: list[str] = ['rip', 'call', 'jmp'], pdata_only: bool = False,
+) -> dict[str, Any]:
+    """Cross-references to an RVA: rip-relative data refs plus direct call/jmp. Cost
+    scales with the scanned range - narrow it with binary_func_bounds."""
+    return _dispatch("binary_xrefs_rva", {
+        "binary_path": binary_path, "target_rva": target_rva,
+        "scan_start_rva": scan_start_rva, "scan_end_rva": scan_end_rva, "kinds": kinds,
+        "pdata_only": pdata_only,
+    })
+
+
+@mcp.tool()
+def binary_func_bounds(
+    binary_path: str, rva: int,
+) -> dict[str, Any]:
+    """Exact function bounds for an RVA from the x64 .pdata table. Null when the RVA has
+    no RUNTIME_FUNCTION (leaf function or 32-bit image)."""
+    return _dispatch("binary_func_bounds", {"binary_path": binary_path, "rva": rva})
+
+
+@mcp.tool()
+def binary_disasm_rva(
+    binary_path: str, rva: int, count: int = 40,
+) -> dict[str, Any]:
+    """RVA-aware disassembly: ImageBase-correct addressing with rip-relative and call
+    targets resolved to RVAs."""
+    return _dispatch("binary_disasm_rva", {
+        "binary_path": binary_path, "rva": rva, "count": count,
+    })
+
+
+@mcp.tool()
+def binary_field_refs(
+    binary_path: str, offset: int, scan_start_rva: int | None = None,
+    scan_end_rva: int | None = None, kind: str = 'both',
+) -> dict[str, Any]:
+    """Find reads/writes of a struct field at [reg+offset] - answers 'who touches
+    this->field_ at +0xB0?'. Defaults to scanning .text."""
+    return _dispatch("binary_field_refs", {
+        "binary_path": binary_path, "offset": offset, "scan_start_rva": scan_start_rva,
+        "scan_end_rva": scan_end_rva, "kind": kind,
+    })
+
+
+@mcp.tool()
+def unpack_detect(
+    binary_path: str,
+) -> dict[str, Any]:
+    """Detect whether a binary is packed and identify the packer
+    (UPX/VMProtect/Themida/ASPack), with section entropy as evidence."""
+    return _dispatch("unpack_detect", {"binary_path": binary_path})
+
+
+@mcp.tool()
+def unpack_auto(
+    binary_path: str, output_path: str = '',
+) -> dict[str, Any]:
+    """Unpack pipeline: detect the packer, try UPX, report what is needed next. Non-UPX
+    packers need a runtime memory dump instead."""
+    return _dispatch("unpack_auto", {"binary_path": binary_path, "output_path": output_path})
+
+
+@mcp.tool()
+def apk_analyze(
+    apk_path: str,
+) -> dict[str, Any]:
+    """Analyze an APK: manifest (package/version/SDK/permissions/components), native
+    libs, dex count, signing info and protection indicators."""
+    return _dispatch("apk_analyze", {"apk_path": apk_path})
+
+
+@mcp.tool()
+def apk_analyze_dex(
+    dex_path: str,
+) -> dict[str, Any]:
+    """Analyze a DEX file: header, class/method/string counts, class names and a sample
+    of strings."""
+    return _dispatch("apk_analyze_dex", {"dex_path": dex_path})
+
+
+@mcp.tool()
+def apk_protections(
+    apk_path: str,
+) -> dict[str, Any]:
+    """Root / SSL-pinning / Frida / emulator detection and packer indicators in an APK,
+    each with the matching string as evidence. Run before spawning the app."""
+    return _dispatch("apk_protections", {"apk_path": apk_path})
+
+
+
+# ── Helpers ───────────────────────────────────────────────────
 
 def _resolve_target(target: str) -> str | int:
+
     """Parse target as PID (int) or process name (str)."""
     try:
         return int(target)
@@ -677,39 +548,8 @@ def _generate_hook_script(
     return "\n".join(parts)
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Dispatch MCP tool calls to FridaPilot Tool Layer.
-
-    Includes audit logging, path validation, and standardized error format.
-    """
-    start = _time.time()
-    try:
-        # Every path-bearing argument goes through the whitelist. Checking only
-        # one key per tool family (as this used to) leaves the other file tools
-        # able to read outside FRIDAPILOT_ALLOWED_DIRS.
-        for key in PATH_ARGUMENTS:
-            value = arguments.get(key)
-            if isinstance(value, str) and value:
-                _check_path_allowed(value)
-
-        result = _handle_tool(name, arguments)
-
-        duration = _time.time() - start
-        _audit_log(name, arguments)
-        # Standardized success response
-        response = {"success": True, "data": result, "duration": round(duration, 3)}
-        return [TextContent(type="text", text=json.dumps(response, indent=2, default=str))]
-    except Exception as e:
-        duration = _time.time() - start
-        logger.exception(f"Tool {name} failed")
-        _audit_log(name, arguments, error=str(e))
-        # Standardized error response
-        response = {"success": False, "error": str(e), "tool": name, "duration": round(duration, 3)}
-        return [TextContent(type="text", text=json.dumps(response, indent=2, default=str))]
-
-
 def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
+
     """Route tool calls to the appropriate Tool Layer function."""
     device_type = DeviceType(arguments.get("device", "local"))
     host = arguments.get("host", "")
@@ -1139,12 +979,9 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
 # ── Entry point ───────────────────────────────────────────────
 
 async def main() -> None:
-    """Run the MCP server via stdio transport."""
-    from mcp.server.stdio import stdio_server
+    """Run the MCP server over stdio."""
+    await mcp.run_stdio_async()
 
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream,
-                         server.create_initialization_options())
 
 
 

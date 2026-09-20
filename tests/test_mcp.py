@@ -1,23 +1,29 @@
 """Tests for the MCP server surface.
 
-The MCP tool list, the dispatch chain and the underlying functions are three
-hand-maintained things that must agree. They have drifted before: the module did
-not even import (it pulled a name the SDK does not export), and the APK tools
-existed in the Python API while MCP clients could not see them.
+The tool list and the dispatch chain are two things that must agree, and they have
+drifted before: the module did not even import (it pulled a name the SDK does not
+export), and the APK tools existed in the Python API while MCP clients could not
+see them. Since the port to the mcp 2.x MCPServer API the schemas come from the
+wrapper signatures, so schema drift is structurally impossible — what remains
+worth asserting is the wrapper/dispatch parity and that the tools actually run.
 
 What is asserted:
-  * the module imports and every declared tool name is dispatched (and vice versa);
-  * schemas are well-formed: required ⊆ properties, every property typed and
-    described;
-  * the file-based tools actually run end to end through ``_handle_tool`` against
-    the synthetic PE / APK fixtures;
-  * every path argument is filtered through the FRIDAPILOT_ALLOWED_DIRS whitelist.
+  * the module imports, and every registered tool is dispatched by _handle_tool
+    (and every dispatched name is registered);
+  * schemas are derived and well formed: required ⊆ properties, every property
+    typed, description present;
+  * the file-based tools run end to end, both through _dispatch and through
+    MCPServer.call_tool, against the synthetic PE / APK fixtures;
+  * failures come back as the documented envelope instead of an exception;
+  * every argument that carries a path is covered by the whitelist.
 """
 
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -27,6 +33,29 @@ from .synthetic_pe import TARGET_RVA, TEXT_RVA, TEXT_VSIZE, write_synthetic_pe
 
 server = pytest.importorskip("fridapilot.mcp.server",
                              reason="the mcp SDK is an optional extra")
+
+
+def _await(value):
+    return asyncio.run(value) if inspect.isawaitable(value) else value
+
+
+def _tools() -> dict[str, object]:
+    listed = server.mcp.list_tools()
+    listed = _await(listed)
+    return {t.name: t for t in listed}
+
+
+def _call(name: str, arguments: dict) -> dict:
+    """Call through the real MCP entry point and unwrap the JSON payload."""
+    async def go():
+        result = server.mcp.call_tool(name, arguments)
+        return await result if inspect.isawaitable(result) else result
+
+    result = asyncio.run(go())
+    structured = getattr(result, "structured_content", None)
+    if structured:
+        return structured
+    return json.loads(result.content[0].text)
 
 
 @pytest.fixture(scope="module")
@@ -53,36 +82,35 @@ def _dispatched_names() -> set[str]:
     return names
 
 
-# ── declaration / dispatch parity ───────────────────────────────────────────
+# ── registration / dispatch parity ──────────────────────────────────────────
 
-def test_declared_and_dispatched_tools_match():
-    declared = {t.name for t in server.TOOLS}
+def test_registered_and_dispatched_tools_match():
+    registered = set(_tools())
     dispatched = _dispatched_names()
-    assert declared - dispatched == set(), \
-        "declared but never dispatched (calls would raise 'Unknown tool')"
-    assert dispatched - declared == set(), \
-        "dispatched but not declared (invisible to MCP clients)"
+    assert registered - dispatched == set(), \
+        "registered but never dispatched (calls would return 'Unknown tool')"
+    assert dispatched - registered == set(), \
+        "dispatched but not registered (invisible to MCP clients)"
 
 
-def test_tool_names_are_unique():
-    names = [t.name for t in server.TOOLS]
-    assert len(names) == len(set(names))
+def test_tools_are_registered_at_all():
+    assert len(_tools()) > 30
 
 
-@pytest.mark.parametrize("tool", server.TOOLS, ids=[t.name for t in server.TOOLS])
-def test_schema_is_well_formed(tool):
-    schema = tool.inputSchema
+@pytest.mark.parametrize("name", sorted(_tools()))
+def test_schema_is_well_formed(name):
+    tool = _tools()[name]
+    schema = tool.input_schema
     assert schema["type"] == "object"
     properties = schema.get("properties", {})
-    assert properties, f"{tool.name} declares no properties"
     for key, spec in properties.items():
-        assert "type" in spec, f"{tool.name}.{key} has no type"
+        assert "type" in spec or "anyOf" in spec, f"{name}.{key} has no type"
     for key in schema.get("required", []):
-        assert key in properties, f"{tool.name} requires undeclared property {key}"
+        assert key in properties, f"{name} requires undeclared property {key}"
     assert tool.description and len(tool.description) > 20
 
 
-def test_unknown_tool_is_rejected():
+def test_unknown_tool_is_rejected_by_the_dispatcher():
     with pytest.raises(ValueError, match="Unknown tool"):
         server._handle_tool("frida_does_not_exist", {})
 
@@ -141,23 +169,50 @@ def test_apk_tools_are_reachable(apk_path, tmp_path):
     assert parsed["version"] == "035"
 
 
+# ── the MCP entry point itself ──────────────────────────────────────────────
+
+def test_call_tool_returns_the_success_envelope(apk_path):
+    payload = _call("apk_analyze", {"apk_path": apk_path})
+    assert payload["success"] is True
+    assert payload["data"]["package_name"] == PACKAGE
+    assert payload["duration"] >= 0
+
+
+def test_call_tool_reports_failure_as_data_not_an_exception(tmp_path):
+    payload = _call("unpack_detect", {"binary_path": str(tmp_path / "missing.dll")})
+    assert payload["success"] is False
+    assert payload["tool"] == "unpack_detect"
+    assert "missing.dll" in payload["error"]
+
+
+def test_schema_defaults_survive_the_round_trip(pe_path):
+    """kinds/pdata_only have defaults, so a minimal call must still work."""
+    payload = _call("binary_xrefs_rva", {
+        "binary_path": pe_path, "target_rva": TARGET_RVA,
+        "scan_start_rva": TEXT_RVA, "scan_end_rva": TEXT_RVA + TEXT_VSIZE})
+    assert payload["success"] is True
+
+
 # ── path whitelist ──────────────────────────────────────────────────────────
 
 def test_every_path_argument_is_whitelisted():
     """A tool taking a path must use a name the whitelist checks."""
-    declared_path_args = set()
-    for tool in server.TOOLS:
-        for key in tool.inputSchema.get("properties", {}):
+    declared = set()
+    for tool in _tools().values():
+        for key in tool.input_schema.get("properties", {}):
             if key.endswith("_path") or key == "filepath":
-                declared_path_args.add(key)
-    assert declared_path_args <= set(server.PATH_ARGUMENTS), \
-        sorted(declared_path_args - set(server.PATH_ARGUMENTS))
+                declared.add(key)
+    assert declared <= set(server.PATH_ARGUMENTS), \
+        sorted(declared - set(server.PATH_ARGUMENTS))
 
 
-@pytest.mark.parametrize("key", ["binary_path", "apk_path", "dex_path"])
-def test_paths_outside_the_whitelist_are_rejected(monkeypatch, key, tmp_path):
+def test_paths_outside_the_whitelist_are_rejected(monkeypatch, tmp_path):
     monkeypatch.setenv("FRIDAPILOT_ALLOWED_DIRS", str(tmp_path))
     with pytest.raises(ValueError, match="outside allowed directories"):
         server._check_path_allowed(str(Path(tmp_path).parent / "elsewhere" / "x.bin"))
     server._check_path_allowed(str(tmp_path / "inside.bin"))       # must not raise
-    assert key in server.PATH_ARGUMENTS
+
+    outside = Path(tmp_path).parent / "outside.apk"
+    payload = server._dispatch("apk_analyze", {"apk_path": str(outside)})
+    assert payload["success"] is False
+    assert "outside allowed directories" in payload["error"]

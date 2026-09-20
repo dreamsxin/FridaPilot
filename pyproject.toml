@@ -27,10 +27,11 @@ agent = [
     "sqlmodel>=0.0.14",
 ]
 mcp = [
-    # The server uses the 1.x low-level decorator API (@server.list_tools() /
-    # @server.call_tool()). mcp 2.x moved to MCPServer and removed those.
-    "mcp>=1.0.0,<2.0.0",
+    # The server uses the 2.x MCPServer API (@mcp.tool() with schemas derived from
+    # the function signature). 1.x had the low-level @server.list_tools() decorators.
+    "mcp>=2.0.0",
 ]
+
 
 dev = [
     "pytest>=7.0.0",
