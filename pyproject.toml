@@ -27,8 +27,11 @@ agent = [
     "sqlmodel>=0.0.14",
 ]
 mcp = [
-    "mcp>=1.0.0",
+    # The server uses the 1.x low-level decorator API (@server.list_tools() /
+    # @server.call_tool()). mcp 2.x moved to MCPServer and removed those.
+    "mcp>=1.0.0,<2.0.0",
 ]
+
 dev = [
     "pytest>=7.0.0",
     "ruff>=0.4.0",
@@ -41,6 +44,12 @@ frida-pilot = "fridapilot.cli.main:app"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+# main.py builds the Typer app first, then imports and registers every
+# subcommand - the imports cannot move above the app definition.
+"fridapilot/cli/main.py" = ["E402"]
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

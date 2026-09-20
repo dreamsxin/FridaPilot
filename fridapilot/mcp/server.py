@@ -16,12 +16,14 @@ import json
 import logging
 import os
 import time as _time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+
 from mcp.server import Server
-from mcp.server.stdio import run_server
 from mcp.types import Tool, TextContent
+
 
 from fridapilot.models.schemas import DeviceType
 
@@ -451,7 +453,163 @@ TOOLS = [
             "required": ["target", "module", "function"],
         },
     ),
+
+    # ── RVA-aware PE analysis (ImageBase-correct; for large DLLs) ──
+    Tool(
+        name="binary_find_string_rva",
+        description="Locate exact strings in a PE and report their RVA and file offset. "
+                    "Start here: the RVA feeds binary_xrefs_rva.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "binary_path": {"type": "string", "description": "Path to the PE file"},
+                "needles": {"type": "array", "items": {"type": "string"},
+                            "description": "Exact strings to locate"},
+                "encoding": {"type": "string", "default": "ascii",
+                             "description": "ascii or utf16le"},
+            },
+            "required": ["binary_path", "needles"],
+        },
+    ),
+    Tool(
+        name="binary_xrefs_rva",
+        description="Cross-references to an RVA: rip-relative data refs plus direct call/jmp. "
+                    "Cost scales with the scanned range - narrow it with binary_func_bounds.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "binary_path": {"type": "string", "description": "Path to the PE file"},
+                "target_rva": {"type": "integer", "description": "RVA to find references to"},
+                "scan_start_rva": {"type": "integer", "description": "Scan range start RVA"},
+                "scan_end_rva": {"type": "integer", "description": "Scan range end RVA"},
+                "kinds": {"type": "array", "items": {"type": "string"},
+                          "default": ["rip", "call", "jmp"],
+                          "description": "rip, call, jmp, imm64, ptr, rva32. Use ptr on .rdata "
+                                         "when a string lives in a const char* table."},
+                "pdata_only": {"type": "boolean", "default": False,
+                               "description": "Only scan .pdata-covered code (fewer false "
+                                              "positives, misses leaf functions)"},
+            },
+            "required": ["binary_path", "target_rva", "scan_start_rva", "scan_end_rva"],
+        },
+    ),
+    Tool(
+        name="binary_func_bounds",
+        description="Exact function bounds for an RVA from the x64 .pdata table. "
+                    "Null when the RVA has no RUNTIME_FUNCTION (leaf function or 32-bit image).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "binary_path": {"type": "string", "description": "Path to the PE file"},
+                "rva": {"type": "integer", "description": "Any RVA inside the function"},
+            },
+            "required": ["binary_path", "rva"],
+        },
+    ),
+    Tool(
+        name="binary_disasm_rva",
+        description="RVA-aware disassembly: ImageBase-correct addressing with rip-relative and "
+                    "call targets resolved to RVAs.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "binary_path": {"type": "string", "description": "Path to the PE file"},
+                "rva": {"type": "integer", "description": "Start RVA, not a file offset"},
+                "count": {"type": "integer", "default": 40,
+                          "description": "Number of instructions"},
+            },
+            "required": ["binary_path", "rva"],
+        },
+    ),
+    Tool(
+        name="binary_field_refs",
+        description="Find reads/writes of a struct field at [reg+offset] - answers 'who touches "
+                    "this->field_ at +0xB0?'. Defaults to scanning .text.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "binary_path": {"type": "string", "description": "Path to the PE file (x64)"},
+                "offset": {"type": "integer", "description": "Struct field offset, e.g. 176"},
+                "scan_start_rva": {"type": "integer", "description": "Scan start RVA (optional)"},
+                "scan_end_rva": {"type": "integer", "description": "Scan end RVA (optional)"},
+                "kind": {"type": "string", "default": "both",
+                         "description": "read, write or both"},
+            },
+            "required": ["binary_path", "offset"],
+        },
+    ),
+
+    # ── Packers ──
+    Tool(
+        name="unpack_detect",
+        description="Detect whether a binary is packed and identify the packer "
+                    "(UPX/VMProtect/Themida/ASPack), with section entropy as evidence.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "binary_path": {"type": "string", "description": "Path to the PE file"},
+            },
+            "required": ["binary_path"],
+        },
+    ),
+    Tool(
+        name="unpack_auto",
+        description="Unpack pipeline: detect the packer, try UPX, report what is needed next. "
+                    "Non-UPX packers need a runtime memory dump instead.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "binary_path": {"type": "string", "description": "Path to the packed binary"},
+                "output_path": {"type": "string", "default": "",
+                                "description": "Where to write the unpacked file"},
+            },
+            "required": ["binary_path"],
+        },
+    ),
+
+    # ── Android APK / DEX (offline, no device needed) ──
+    Tool(
+        name="apk_analyze",
+        description="Analyze an APK: manifest (package/version/SDK/permissions/components), "
+                    "native libs, dex count, signing info and protection indicators.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "apk_path": {"type": "string", "description": "Path to the .apk file"},
+            },
+            "required": ["apk_path"],
+        },
+    ),
+    Tool(
+        name="apk_analyze_dex",
+        description="Analyze a DEX file: header, class/method/string counts, class names and a "
+                    "sample of strings.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "dex_path": {"type": "string", "description": "Path to the .dex file"},
+            },
+            "required": ["dex_path"],
+        },
+    ),
+    Tool(
+        name="apk_protections",
+        description="Root / SSL-pinning / Frida / emulator detection and packer indicators in an "
+                    "APK, each with the matching string as evidence. Run before spawning the app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "apk_path": {"type": "string", "description": "Path to the .apk file"},
+            },
+            "required": ["apk_path"],
+        },
+    ),
 ]
+
+# Argument names that carry a filesystem path; every one of them goes through the
+# FRIDAPILOT_ALLOWED_DIRS whitelist before the tool runs.
+PATH_ARGUMENTS = ("binary_path", "apk_path", "dex_path", "filepath", "output_path")
+
 
 
 # ── Tool handlers ─────────────────────────────────────────────
@@ -492,10 +650,10 @@ def _generate_hook_script(
     else:
         resolve = f"Module.findExportByName('{module}', '{function}')"
 
-    parts = [f"(function() {{",
+    parts = ["(function() {",
              f"  const addr = {resolve};",
              f"  if (!addr) {{ console.log('[FridaPilot] {module}!{function} not found'); return; }}",
-             f"  Interceptor.attach(addr, {{"]
+             "  Interceptor.attach(addr, {"]
 
     on_enter = ["    onEnter(args) {"]
     on_enter.append(f"      const info = {{ type: 'hook', module: '{module}', function: '{function}' }};")
@@ -527,15 +685,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """
     start = _time.time()
     try:
-        # Validate paths for binary analysis tools
-        if name.startswith("binary_"):
-            path_key = "binary_path"
-            if path_key in arguments:
-                _check_path_allowed(arguments[path_key])
-        if name == "frida_crypto_scan":
-            _check_path_allowed(arguments.get("binary_path", ""))
+        # Every path-bearing argument goes through the whitelist. Checking only
+        # one key per tool family (as this used to) leaves the other file tools
+        # able to read outside FRIDAPILOT_ALLOWED_DIRS.
+        for key in PATH_ARGUMENTS:
+            value = arguments.get(key)
+            if isinstance(value, str) and value:
+                _check_path_allowed(value)
 
         result = _handle_tool(name, arguments)
+
         duration = _time.time() - start
         _audit_log(name, arguments)
         # Standardized success response
@@ -910,14 +1069,83 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
         finally:
             detach(session)
 
+    # ── RVA-aware PE analysis ──
+
+    if name == "binary_find_string_rva":
+        from fridapilot.tools.pe_rva import find_string_rvas
+        return find_string_rvas(arguments["binary_path"], list(arguments["needles"]),
+                                arguments.get("encoding", "ascii"))
+
+    if name == "binary_xrefs_rva":
+        from fridapilot.tools.pe_rva import xrefs_to_rva
+        return xrefs_to_rva(
+            arguments["binary_path"],
+            int(arguments["target_rva"]),
+            int(arguments["scan_start_rva"]),
+            int(arguments["scan_end_rva"]),
+            kinds=tuple(arguments.get("kinds") or ("rip", "call", "jmp")),
+            scan_gaps=not arguments.get("pdata_only", False),
+        )
+
+    if name == "binary_func_bounds":
+        from fridapilot.tools.pe_rva import function_bounds
+        return function_bounds(arguments["binary_path"], int(arguments["rva"]))
+
+    if name == "binary_disasm_rva":
+        from fridapilot.tools.pe_rva import disassemble_rva
+        return disassemble_rva(arguments["binary_path"], int(arguments["rva"]),
+                               count=int(arguments.get("count", 40)))
+
+    if name == "binary_field_refs":
+        from fridapilot.tools.pe_rva import field_refs
+        start = arguments.get("scan_start_rva")
+        end = arguments.get("scan_end_rva")
+        return field_refs(
+            arguments["binary_path"], int(arguments["offset"]),
+            scan_start_rva=int(start) if start is not None else None,
+            scan_end_rva=int(end) if end is not None else None,
+            kind=arguments.get("kind", "both"),
+        )
+
+    # ── Packers ──
+
+    if name == "unpack_detect":
+        from fridapilot.tools.unpacker import detect_packer
+        return asdict(detect_packer(arguments["binary_path"]))
+
+    if name == "unpack_auto":
+        from fridapilot.tools.unpacker import auto_unpack
+        return asdict(auto_unpack(arguments["binary_path"],
+                                  arguments.get("output_path", "")))
+
+    # ── Android APK / DEX ──
+
+    if name == "apk_analyze":
+        from fridapilot.tools.apk_analysis import analyze_apk
+        return asdict(analyze_apk(arguments["apk_path"]))
+
+    if name == "apk_analyze_dex":
+        from fridapilot.tools.apk_analysis import analyze_dex
+        return asdict(analyze_dex(arguments["dex_path"]))
+
+    if name == "apk_protections":
+        from fridapilot.tools.apk_analysis import detect_protections
+        return detect_protections(arguments["apk_path"])
+
     raise ValueError(f"Unknown tool: {name}")
+
 
 
 # ── Entry point ───────────────────────────────────────────────
 
 async def main() -> None:
     """Run the MCP server via stdio transport."""
-    await run_server(server)
+    from mcp.server.stdio import stdio_server
+
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream,
+                         server.create_initialization_options())
+
 
 
 if __name__ == "__main__":
