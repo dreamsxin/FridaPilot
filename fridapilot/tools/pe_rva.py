@@ -300,9 +300,31 @@ def field_refs(
     import capstone
 
     WRITE_OPS = {0x89: "mov", 0xC7: "mov", 0x01: "add", 0x29: "sub",
-                 0x31: "xor", 0x09: "or", 0x21: "and"}
+                 0x31: "xor", 0x09: "or", 0x21: "and",
+                 # byte-sized
+                 0x88: "mov", 0xC6: "mov", 0x00: "add", 0x28: "sub",
+                 0x30: "xor", 0x08: "or", 0x20: "and", 0x80: "arith",
+                 0xFE: "inc/dec", 0xFF: "inc/dec/call",
+                 # shift
+                 0xC0: "shift", 0xC1: "shift", 0xD0: "shift", 0xD1: "shift",
+                 0xD2: "shift", 0xD3: "shift",
+                 # group3
+                 0xF6: "test/neg", 0xF7: "test/neg",
+                 # xchg
+                 0x86: "xchg", 0x87: "xchg",
+                 }
     READ_OPS = {0x8B: "mov", 0x03: "add", 0x2B: "sub", 0x33: "xor",
-                0x0B: "or", 0x23: "and", 0x3B: "cmp", 0x85: "test"}
+                0x0B: "or", 0x23: "and", 0x3B: "cmp", 0x85: "test",
+                # byte-sized
+                0x8A: "mov", 0x02: "add", 0x2A: "sub", 0x32: "xor",
+                0x0A: "or", 0x22: "and", 0x3A: "cmp", 0x84: "test",
+                # lea (often used to take address of struct field)
+                0x8D: "lea",
+                # adc / sbb
+                0x12: "adc", 0x13: "adc", 0x1A: "sbb", 0x1B: "sbb",
+                # movsxd
+                0x63: "movsxd",
+                }
 
     img = PEImage(binary_path)
     if scan_start_rva is None or scan_end_rva is None:
