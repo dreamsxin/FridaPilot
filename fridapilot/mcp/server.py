@@ -420,6 +420,23 @@ def binary_find_string_rva(
 
 
 @mcp.tool()
+def binary_inline_strings(
+    binary_path: str, text: str, encoding: str = "utf8", section: str = ".text",
+    window: int = 96, limit: int = 100,
+) -> dict[str, Any]:
+    """Find a string the code CONSTRUCTS in registers (movabs imm64) instead of pointing at.
+    Use this when binary_find_string_rva finds nothing, or finds the string but
+    binary_xrefs_rva reports no references: an inline string has no .rdata copy and its
+    characters are split by the opcode bytes carrying them, so contiguous searches and xref
+    scans both structurally miss it. Returns the carrying instruction RVA, how many 8-byte
+    groups were confirmed, and the enclosing .pdata function."""
+    return _dispatch("binary_inline_strings", {
+        "binary_path": binary_path, "text": text, "encoding": encoding,
+        "section": section, "window": window, "limit": limit,
+    })
+
+
+@mcp.tool()
 def binary_index_build(
     binary_path: str, section: str = ".text", target_sections: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -997,6 +1014,15 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
         from fridapilot.tools.pe_rva import find_string_rvas
         return find_string_rvas(arguments["binary_path"], list(arguments["needles"]),
                                 arguments.get("encoding", "ascii"))
+
+    if name == "binary_inline_strings":
+        from fridapilot.tools.pe_rva import find_inline_strings
+        return find_inline_strings(
+            arguments["binary_path"], arguments["text"],
+            encoding=arguments.get("encoding", "utf8"),
+            section=arguments.get("section", ".text"),
+            window=int(arguments.get("window", 96)),
+            limit=int(arguments.get("limit", 100)))
 
     if name == "binary_index_build":
         from fridapilot.tools.rip_index import build_rip_index

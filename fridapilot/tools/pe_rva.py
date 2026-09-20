@@ -955,4 +955,139 @@ def xrefs_to_rva(
     return deduped
 
 
+# ── inline (immediate-encoded) strings ──────────────────────────────────────
+
+# MOV r64, imm64 is `REX.W B8+r`; with REX.B for r8-r15 the prefix is 0x49.
+_MOVABS_PREFIXES = (0x48, 0x49)
+
+
+def _immediate_chunks(pat: bytes) -> list[bytes]:
+    """Split a string into the immediates a compiler would materialise it from.
+
+    An inline string is built register-width at a time, so the bytes that actually
+    appear in ``.text`` are 8-byte groups, not the string. The tail is the awkward
+    part: for a length that is not a multiple of 8, MSVC emits a narrower store for
+    the remainder (``mov eax, imm32``) while clang prefers an *overlapping* 8-byte
+    store of the last 8 bytes. Both forms are offered for the final group so the
+    match does not depend on which compiler produced the binary.
+    """
+    chunks = [pat[i:i + 8] for i in range(0, len(pat), 8)]
+    if len(pat) > 8 and len(pat) % 8:
+        chunks.append(pat[-8:])          # clang's overlapping tail store
+    return [c for c in chunks if c]
+
+
+def find_inline_strings(
+    binary_path: str | Path,
+    text: str,
+    encoding: str = "utf8",
+    section: str = ".text",
+    scan_start_rva: int | None = None,
+    scan_end_rva: int | None = None,
+    window: int = 96,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Find a string that code *constructs in registers* instead of pointing at.
+
+    This is the blind spot every other locator in this module shares. An inline
+    string has no ``.rdata`` copy and therefore no address, so:
+
+    * ``find_string_rvas`` / ``find_text`` / ``search_bytes`` search for contiguous
+      bytes, and the string is **not contiguous** — the immediates are separated by
+      the opcode bytes of the instructions carrying them. ``b"AudioBuffer"`` is
+      emitted as ``48 B8 'AudioBuf' | B8 'fer' 00``, so a search for the 11 bytes
+      finds nothing while a search for the first 8 succeeds. Strings of exactly 8
+      bytes are the one length where a plain search happens to work, which is how
+      this gap stayed hidden.
+    * ``xrefs_to_rva`` needs a target RVA to reference, and there is no target.
+      Structurally, not a tuning problem.
+
+    So search for the first 8 bytes as an anchor — 8 bytes of text is already a very
+    specific pattern — then confirm the remaining groups appear within ``window``
+    bytes, and report how complete the reconstruction was.
+
+    Args:
+        text: the string to look for, as it appears in source.
+        encoding: codec used to turn ``text`` into bytes ("utf8", "utf16le", "gbk", …).
+        section: section to search; ".text" is where inline construction lives.
+        scan_start_rva / scan_end_rva: omit to take the whole section.
+        window: bytes after the anchor in which the remaining groups must appear.
+            Construction is contiguous in practice; the default tolerates
+            interleaved stores and register shuffling.
+        limit: maximum number of sites to return.
+
+    Returns list of {text, from_rva, section, anchor_hex, opcode, chunks_total,
+    chunks_found, coverage, func_begin_rva, func_end_rva}, best coverage first.
+    ``opcode == "movabs"`` means the anchor is genuinely a MOV r64, imm64 operand
+    rather than an incidental byte match, and is the field to filter on.
+    """
+    try:
+        from fridapilot.tools.binary_analysis import TEXT_CODECS
+        pat = text.encode(TEXT_CODECS.get(encoding.lower(), encoding))
+    except (LookupError, UnicodeEncodeError) as exc:
+        raise ValueError(f"cannot encode {text!r} as {encoding}: {exc}") from exc
+    if len(pat) < 4:
+        raise ValueError(
+            f"{text!r} encodes to {len(pat)} bytes: too short to identify an inline "
+            "construction site, use find_text/search_bytes instead")
+
+    img = PEImage(binary_path)
+    scan_start_rva, scan_end_rva, section_name = _resolve_scan_range(
+        img, scan_start_rva, scan_end_rva, section)
+    data = img.read_rva(scan_start_rva, scan_end_rva - scan_start_rva)
+    if data is None:
+        return []
+
+    chunks = _immediate_chunks(pat)
+    anchor = chunks[0]
+    rest = chunks[1:]
+
+    out: list[dict[str, Any]] = []
+    start = 0
+    while len(out) < limit:
+        i = data.find(anchor, start)
+        if i < 0:
+            break
+        start = i + 1
+
+        # Which of the remaining groups show up just after the anchor?
+        tail = data[i + len(anchor): i + len(anchor) + window]
+        found = 1 + sum(1 for c in rest if c in tail)
+        # The two tail variants are alternatives, so only one of them can ever be
+        # present; count the group once rather than penalising the coverage.
+        expected = len(chunks) - (1 if len(pat) > 8 and len(pat) % 8 else 0)
+        found = min(found, expected)
+
+        # Report the instruction start, not the immediate, so that from_rva can be
+        # fed straight to disassemble_rva / function_bounds like every other
+        # reference in this module. Falls back to the anchor when the carrier
+        # instruction is not one of the two recognised forms.
+        opcode = ""
+        head = 0
+        if i >= 2 and data[i - 2] in _MOVABS_PREFIXES and 0xB8 <= data[i - 1] <= 0xBF:
+            opcode, head = "movabs", 2
+        elif i >= 1 and 0xB8 <= data[i - 1] <= 0xBF:
+            opcode, head = "mov r32, imm32", 1
+
+        rva = scan_start_rva + i - head
+        func = img.function_at(rva)
+        out.append({
+            "text": text,
+            "from_rva": rva,
+            "section": img.section_of(rva) or section_name,
+            "anchor_hex": anchor.hex(),
+            "opcode": opcode,
+            "chunks_total": expected,
+            "chunks_found": found,
+            "coverage": found / expected,
+            "func_begin_rva": func[0] if func else None,
+            "func_end_rva": func[1] if func else None,
+        })
+
+    # A confirmed movabs with every group present is the answer; an unconfirmed
+    # partial match is a lead. Order accordingly.
+    out.sort(key=lambda r: (-r["coverage"], r["opcode"] == "", r["from_rva"]))
+    return out
+
+
 

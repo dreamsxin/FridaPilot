@@ -28,7 +28,14 @@ from pathlib import Path
 
 import pytest
 
-from .synthetic_pe import MARKER_TEXT, TARGET_RVA, TEXT_RVA, TEXT_VSIZE, write_synthetic_pe
+from .synthetic_pe import (
+    INLINE_TEXT,
+    MARKER_TEXT,
+    TARGET_RVA,
+    TEXT_RVA,
+    TEXT_VSIZE,
+    write_synthetic_pe,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -290,6 +297,7 @@ def _actual_keys(name: str, path: str) -> set[str]:
     end = TEXT_RVA + TEXT_VSIZE
     calls = {
         "find_string_rvas": lambda: pe_rva.find_string_rvas(path, ["\x01"])[0],
+        "find_inline_strings": lambda: pe_rva.find_inline_strings(path, INLINE_TEXT)[0],
         "xrefs_to_rva": lambda: pe_rva.xrefs_to_rva(path, TARGET_RVA, TEXT_RVA, end,
                                                     kinds=("rip",))[0],
         "field_refs": lambda: None,

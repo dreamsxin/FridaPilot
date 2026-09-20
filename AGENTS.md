@@ -158,6 +158,14 @@ If a signature changes, fix the docs in the same commit — the test will point 
   and refuses queries outside its recorded coverage, which is the only reason it is safe: a cache
   that answers beyond what it scanned reproduces the partial-scan false negative.
 
+- **Inline-constructed strings defeat every contiguous search.** A string the compiler builds in
+  registers (`movabs rax, imm64` plus a narrower store for the tail) has no `.rdata` copy, and its
+  characters are separated by the opcode bytes carrying them — so `find_string_rvas`, `find_text`
+  and `search_bytes` all return nothing, and `xrefs_to_rva` has no target RVA to look for. A
+  string of *exactly* 8 bytes is the one length a plain search happens to find, which is why the
+  docs wrongly claimed `find_text` covered this case for several commits. Use
+  `pe_rva.find_inline_strings`, and check its `opcode` field before trusting a hit.
+  *(enforced: `tests/test_pe_rva.py::test_inline_string_is_invisible_to_contiguous_search`)*
 - **Substring matching on identifiers.** Short indicators must match on token boundaries;
   `"su" in blob` fires on `issue`, `consumer` and `resume`.
 - **String extraction is encoding-blind by default.** The ASCII scanner accepts only 0x20-0x7e,

@@ -200,6 +200,13 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 - pe_rva.section_range(path, name) -> {section, start_rva, end_rva, size}. Call this instead of
   guessing scan bounds
 - pe_rva.find_string_rvas(path, needles, encoding) -> Find exact strings and their RVA/file offset
+- pe_rva.find_inline_strings(path, text, encoding, section) -> Find a string the code BUILDS in
+  registers (movabs imm64) rather than points at. Reach for this when find_string_rvas finds
+  nothing, or finds the string but xrefs_to_rva reports no references. An inline string has no
+  .rdata copy and its characters are split by the opcode bytes carrying them, so contiguous
+  searches and xref scans both miss it structurally - only a chunked-immediate scan finds it.
+  Returns the carrying instruction RVA, how many 8-byte groups were confirmed, and the enclosing
+  .pdata function. Filter on opcode == "movabs" for confirmed sites
 - pe_rva.xrefs_to_rva(path, target_rva, start, end, kinds, section) -> Cross-references to an RVA
   (correct across sections). Omit start/end to scan the whole section (.text by default, or
   section=".rdata" with kinds=("ptr",)). NEVER pass a hand-picked sub-range unless you mean to:
@@ -273,8 +280,14 @@ Step 2 — Cross-references. xrefs_to_rva defaults to the whole section — NEVE
 sub-range unless deliberate. A partial scan returning nothing is indistinguishable from "no
 references" (real bug: 240 MB .text, 21.8% scanned, reported 0 refs). Always check the
 printed coverage. Empty rip ≠ no references: try section=".rdata" kinds=("ptr",) for table
-pointers, then find_text for movabs inline construction. For N targets use map_refs_to_functions
-(one scan instead of N).
+pointers, then find_inline_strings for strings the code builds in registers. For N targets use
+map_refs_to_functions (one scan instead of N).
+
+Step 2b — Inline strings. If the string has no .rdata copy at all, or has one that nothing
+references, the code may construct it from immediates. Use find_inline_strings: a contiguous
+byte search cannot find it (the characters are separated by the opcodes carrying them) and
+xrefs_to_rva has no target RVA to look for. This is a structural blind spot in every other
+locator, not a tuning issue — do not conclude "unused" without checking it.
 
 Step 2.5 — rip index (optional, amortises cost). When more than a couple of xref questions
 are planned for the same binary, call build_rip_index once. It stores every rip reference;

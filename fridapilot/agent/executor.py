@@ -91,6 +91,7 @@ def _register_tools() -> None:
         # PE RVA-aware analysis tools
         "pe_rva.section_range": pe_rva.section_range,
         "pe_rva.find_string_rvas": pe_rva.find_string_rvas,
+        "pe_rva.find_inline_strings": pe_rva.find_inline_strings,
 
         "pe_rva.xrefs_to_rva": pe_rva.xrefs_to_rva,
         "pe_rva.field_refs": pe_rva.field_refs,

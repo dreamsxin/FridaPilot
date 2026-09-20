@@ -115,6 +115,7 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp binary xrefs --address <addr>` | 交叉引用查找（CALL/JMP） | ❌ |
 | `fp binary analyze-go <file>` | Go 二进制分析（版本/包/函数/源码路径） | ❌ |
 | `fp binary find-string-rva <file>` | 定位字符串并返回 RVA（区分文件偏移/RVA） | ❌ |
+| `fp binary inline-strings <file> --text <串>` | 定位代码用 `movabs` **内联构造**的字符串（无 .rdata 副本，连续字节搜索和 xref 都找不到） | ❌ |
 | `fp binary index-build <file>` | 扫一遍建 rip 引用索引，之后 `xrefs-rva --kinds rip` 变成数据库查询（ntdll 实测 3.9s 建索引，查询 4.2s→~0s） | ❌ |
 | `fp binary index-info [file]` | 查看索引覆盖范围 / 列出全部索引 | ❌ |
 | `fp binary index-drop <file>` | 删除该文件内容对应的索引 | ❌ |
@@ -283,7 +284,29 @@ fp binary map-refs target.dll --strings "key_a,key_b,key_c"
 - 检查打印的覆盖率百分比：低于 100% 说明扫描不完整
 - `rip` 找不到时试 `--section .rdata --kinds ptr`（表指针）
 - 多目标用 `map-refs` 一次扫描，不要循环调用 `xrefs-rva`
-- 仍找不到 → 字符串可能是 `movabs` 内联构造（寄存器拼装），此时 `find-text` 在 `.text` 中能定位
+- 仍找不到 → 字符串可能是 `movabs` 内联构造（寄存器拼装），用 `fp binary inline-strings`。**不要用 `find-text`**：字符被携带它们的指令操作码切断，任何连续字节搜索都找不到
+
+**Step 2b — 内联构造字符串（其他工具的结构性盲区）**
+
+```bash
+fp binary inline-strings target.dll --text AudioBuffer
+fp binary inline-strings target.dll --text AudioBuffer --confirmed
+fp binary inline-strings target.dll --text 许可过期 --encoding gbk
+```
+
+编译器把字符串按 8 字节一组塞进立即数，字符被操作码隔开。`AudioBuffer`（11 字节）实际是：
+
+```
+48 B8 41 75 64 69 6F 42 75 66    movabs rax, imm64  -> "AudioBuf"
+B8 66 65 72 00                   mov eax, imm32     -> "fer\0"
+```
+
+完整 11 字节在整个文件里**不连续出现**，所以 `find-string-rva` / `find-text` / `search-bytes` 全部返回空；`xrefs-rva` 更没有目标 RVA 可查。只有恰好 8 字节的串能被普通搜索命中——这就是这个盲区长期没暴露的原因。该命令用前 8 字节做锚点，再确认后续分组。
+
+- `opcode` 为 `movabs` 表示锚点确实是 `MOV r64, imm64` 的操作数；为空表示字节匹配但前面没有 MOV 立即数指令（可能是数据），需反汇编确认
+- `--confirmed` 只输出前者
+- `func_begin_rva` 为 None 很常见：内联构造多出现在没有 `.pdata` 条目的小叶函数里
+
 
 **Step 2.5 — rip 索引（同一文件多次查询时建一次）**
 
@@ -527,6 +550,7 @@ binary_section_range      # 节的起止 RVA（扫描范围别手填，先问它
 binary_metadata           # 元数据侦察：PDB GUID/符号服务器 key、版本资源、manifest、工具链、Rust 源码路径
 binary_find_text          # 同一串按多种编码同时搜（ascii/utf8/utf16le/gbk/big5/cp932/...），返回 RVA
 binary_find_string_rva    # 定位字符串并返回 RVA
+binary_inline_strings     # 定位 movabs 内联构造的字符串（连续搜索 + xref 的结构性盲区）
 
 
 binary_xrefs_rva          # RVA 交叉引用（rip 数据引用 + call/jmp，支持 pdata_only）

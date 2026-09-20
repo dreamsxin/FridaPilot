@@ -552,6 +552,74 @@ def find_string_rva_cmd(
             console.print(f"  RVA 0x{r['rva']:08x}  off 0x{r['offset']:08x}  {r['needle'][:80]}")
 
 
+@binary_app.command("inline-strings")
+def inline_strings_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file."),
+    text: str = typer.Option(..., "--text", "-t", help="String the code builds inline."),
+    encoding: str = typer.Option("utf8", "--encoding", "-e",
+                                 help="Codec for the text: utf8, utf16le, gbk, cp932, ..."),
+    section: str = typer.Option(".text", "--section", help="Section to search."),
+    window: int = typer.Option(96, "--window", help="Bytes after the anchor to confirm in."),
+    confirmed: bool = typer.Option(False, "--confirmed",
+                                   help="Only sites whose anchor is a real MOV imm operand."),
+    limit: int = typer.Option(100, "--limit", "-l", help="Maximum sites to report."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Find a string the code CONSTRUCTS in registers (movabs), not one it points at.
+
+    Use this when find-string-rva finds the string but xrefs-rva finds no references,
+    or when find-string-rva finds nothing at all: an inline string has no .rdata copy
+    and its characters are split by the opcode bytes carrying them, so no contiguous
+    search and no xref scan can reach it.
+    """
+    from fridapilot.tools.pe_rva import find_inline_strings
+
+    filepath = Path(binary)
+    if not filepath.exists():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        hits = find_inline_strings(binary, text, encoding=encoding, section=section,
+                                  window=window, limit=limit)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    if confirmed:
+        hits = [h for h in hits if h["opcode"]]
+
+    if json_output:
+        _emit_json(hits)
+        return
+
+    if not hits:
+        console.print(f"[yellow]No inline construction of {text!r} found in {section}.[/yellow]")
+        console.print("[dim]It may be a normal .rdata string - try `find-string-rva` / "
+                      "`find-text`, or widen --window.[/dim]")
+        return
+
+    table = Table(title=f"Inline construction of {text!r} ({len(hits)} site(s))")
+    table.add_column("RVA", style="cyan")
+    table.add_column("Section")
+    table.add_column("Carrier", style="green")
+    table.add_column("Groups")
+    table.add_column("Function", style="dim")
+    for h in hits:
+        func = (f"0x{h['func_begin_rva']:x}-0x{h['func_end_rva']:x}"
+                if h["func_begin_rva"] is not None else "(no .pdata entry)")
+        table.add_row(
+            f"0x{h['from_rva']:08x}",
+            h["section"],
+            h["opcode"] or "[yellow]unconfirmed[/yellow]",
+            f"{h['chunks_found']}/{h['chunks_total']}",
+            func,
+        )
+    console.print(table)
+    console.print("[dim]Carrier 'unconfirmed' means the bytes matched but no MOV imm opcode "
+                  "precedes them - could be data. Disassemble to confirm.[/dim]")
+
+
 @binary_app.command("field-refs")
 def field_refs_cmd(
     binary: str = typer.Argument(..., help="Path to PE file (x64)."),

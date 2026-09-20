@@ -204,8 +204,49 @@ a string that is obviously used, rescan `.rdata` with `kinds=("ptr",)`.
 
 If that also finds nothing, the string may be **built inline** — Chromium emits
 `movabs rcx, 0x6573696f4e747865` ("extNoise") and assembles it in registers, so there is no
-operand pointing at `.rdata` to find. The little-endian immediate bytes are the characters in
-order, so `find_text` locates it directly in `.text`; `xrefs_to_rva` structurally cannot.
+operand pointing at `.rdata` to find. `xrefs_to_rva` structurally cannot find it (there is no
+target RVA), and **neither can a contiguous byte search**: use `find_inline_strings` (below).
+
+### find_inline_strings — strings the code builds instead of points at
+
+```python
+from fridapilot.tools.pe_rva import find_inline_strings
+
+sites = find_inline_strings("chrome.dll", "AudioBuffer")
+sites = find_inline_strings("chrome.dll", "\u8bb8\u53ef", encoding="gbk", section=".text")
+```
+
+<!-- return-keys: find_inline_strings = text, from_rva, section, anchor_hex, opcode, chunks_total, chunks_found, coverage, func_begin_rva, func_end_rva -->
+Rows: `text`, `from_rva` (the carrying instruction, ready for `disasm-rva`), `section`,
+`anchor_hex`, `opcode`, `chunks_total`, `chunks_found`, `coverage`, `func_begin_rva`,
+`func_end_rva`. Best coverage first.
+
+Why a plain search cannot do this: an inline string is materialised 8 bytes at a time, so the
+characters are separated by the opcode bytes carrying them. `b"AudioBuffer"` (11 bytes) becomes
+
+```
+48 B8 41 75 64 69 6F 42 75 66    movabs rax, imm64   -> "AudioBuf"
+B8 66 65 72 00                   mov eax, imm32      -> "fer\0"
+```
+
+The 11 bytes appear contiguously **nowhere** in the image, so `find_string_rvas`, `find_text` and
+`search_bytes` all return nothing. Only the first 8 do — which is why a string of *exactly* 8
+bytes looks like the tool works, and anything longer silently fails. This function anchors on the
+first 8 bytes, then confirms the remaining groups within `window` bytes.
+
+`opcode` is the field to trust: `"movabs"` means the anchor really is a `MOV r64, imm64` operand,
+`""` means the bytes matched but no MOV immediate precedes them — possibly data, so disassemble
+before believing it. `coverage == 1.0` means every group was accounted for.
+
+```bash
+fp binary inline-strings chrome.dll --text AudioBuffer
+fp binary inline-strings chrome.dll --text AudioBuffer --confirmed --json
+fp binary inline-strings app.exe --text 许可过期 --encoding gbk
+```
+
+`func_begin_rva` is `None` for a site outside every `.pdata` entry, which is common: inline
+construction is a hallmark of small leaf helpers.
+
 
 How rip references are found (relevant when judging results):
 
@@ -404,7 +445,8 @@ nothing is indistinguishable from "this target has no references", and that exac
 happened on a 240 MB `.text`. Always check the printed coverage percentage. If `rip` finds
 nothing for a string that is obviously used, rescan `.rdata` with `kinds=("ptr",)` (Chromium
 collects `const char*` into arrays and only LEAs the array base). If that also finds nothing,
-the string may be built inline via `movabs` — `find-text` can locate it directly in `.text`.
+the string may be built inline via `movabs` — use `find-inline-strings`, **not** `find-text`: the
+characters are split by the opcodes carrying them, so no contiguous search reaches them.
 For N targets use `map-refs`, which scans once.
 
 **Step 2.5 — rip index (optional, amortises cost).** When the investigation will ask more than
@@ -432,7 +474,10 @@ analysis found the function; dynamic analysis reads its arguments.
 
 - **`.pdata` is x64-only.** On a 32-bit image `function_bounds` returns `None`, `exception_table`
   is empty, and `xrefs_to_rva` relies entirely on pass B (`scan_gaps=True`, the default).
-- **`rip` finding nothing is not proof of absence.** Try `ptr` on `.rdata`, and widen the range.
+- **`rip` finding nothing is not proof of absence.** Try `ptr` on `.rdata`, widen the range, and
+  check `find_inline_strings` — a string built from immediates has no address to reference, so
+  every xref scan and every contiguous byte search misses it by construction. Only a string of
+  exactly 8 bytes happens to survive a plain search, which is what hid this for so long.
 - Heuristics worth knowing, not guarantees: libc++ `std::string` stores up to 22 `char`s inline
   before heap-allocating, so read the SSO flag byte before dereferencing; and a `movzx byte +
   test + jne` on a global in Chromium is often PGO hot/cold splitting rather than the real

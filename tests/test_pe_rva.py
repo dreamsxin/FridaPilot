@@ -25,6 +25,8 @@ import pytest
 
 from fridapilot.tools.pe_rva import (
     PEImage,
+    find_inline_strings,
+    find_string_rvas,
     function_bounds,
     map_refs_to_functions,
     section_range,
@@ -35,6 +37,8 @@ from fridapilot.tools.pe_rva import (
 from .synthetic_pe import (
     CALL_TARGET_RVA,
     IMAGE_BASE,
+    INLINE_RVA,
+    INLINE_TEXT,
     PTR_RVA,
     RDATA_RVA,
     RIP_FORMS,
@@ -302,3 +306,64 @@ def test_ntdll_matches_full_disassembly_ground_truth():
         assert truth[target] <= got, sorted(truth[target] - got)
         for from_rva in got:
             assert _rip_target_of(NTDLL, from_rva) == target, hex(from_rva)
+
+
+# ── inline (immediate-encoded) strings ──────────────────────────────────────
+#
+# These pin the blind spot that motivated find_inline_strings: a string the
+# compiler builds in registers has no .rdata copy and its characters are split by
+# the opcode bytes carrying them, so every contiguous-bytes locator misses it and
+# xrefs_to_rva has no target RVA to look for. Asserting the *absence* first is the
+# point - without it a passing find_inline_strings proves nothing new.
+
+
+def test_inline_string_is_invisible_to_contiguous_search(fixture_pe):
+    """The failure being fixed: nothing in the image holds the string in one piece."""
+    path, _placed, _end = fixture_pe
+    raw = INLINE_TEXT.encode("utf-8")
+    data = PEImage(path)._data
+
+    assert raw not in data, (
+        f"fixture is wrong: {INLINE_TEXT!r} must never appear contiguously, "
+        "otherwise this test cannot distinguish inline construction from a "
+        "plain .rdata string")
+    assert raw[:8] in data, "the first 8 bytes must be a contiguous imm64 operand"
+
+    # ...and therefore the byte-level locators report nothing.
+    assert all(r["rva"] is None for r in find_string_rvas(path, [INLINE_TEXT]))
+
+
+def test_find_inline_strings_locates_the_construction_site(fixture_pe):
+    path, _placed, _end = fixture_pe
+    hits = find_inline_strings(path, INLINE_TEXT)
+
+    assert hits, f"{INLINE_TEXT!r} is built at INLINE_RVA but was not found"
+    best = hits[0]
+    assert best["from_rva"] == INLINE_RVA
+    # The anchor must be the operand of a real MOV r64, imm64, not a chance match.
+    assert best["opcode"] == "movabs"
+    # "AudioBuf" + "fer" = both groups accounted for.
+    assert best["chunks_found"] == best["chunks_total"] == 2
+    assert best["coverage"] == 1.0
+    assert best["section"] == ".text"
+
+
+def test_find_inline_strings_reports_no_pdata_function_for_a_leaf_site(fixture_pe):
+    """INLINE_RVA sits outside every RUNTIME_FUNCTION, as leaf code does."""
+    path, _placed, _end = fixture_pe
+    best = find_inline_strings(path, INLINE_TEXT)[0]
+    assert best["func_begin_rva"] is None
+    assert function_bounds(path, INLINE_RVA) is None
+
+
+def test_find_inline_strings_finds_nothing_for_absent_text(fixture_pe):
+    path, _placed, _end = fixture_pe
+    assert find_inline_strings(path, "NoSuchStringHere") == []
+
+
+def test_find_inline_strings_rejects_text_too_short_to_identify(fixture_pe):
+    """Under 4 bytes the anchor is not specific enough to mean anything."""
+    path, _placed, _end = fixture_pe
+    with pytest.raises(ValueError, match="too short"):
+        find_inline_strings(path, "abc")
+

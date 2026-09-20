@@ -28,6 +28,8 @@ GBK_RVA = RDATA_RVA + 0x40       # the same idea in CP936, invisible to an ASCII
 GBK_TEXT = "\u914d\u7f6e\u5df2\u52a0\u8f7d"
 CALL_TARGET_RVA = TEXT_RVA + 0x200
 LEAF_RVA = TEXT_RVA + 0x300      # deliberately outside every .pdata entry
+INLINE_RVA = TEXT_RVA + 0x340    # string built in registers; no .rdata copy exists
+INLINE_TEXT = "AudioBuffer"      # 11 bytes -> movabs imm64 + mov imm32, never contiguous
 UNWIND_RVA = 0x4000
 
 
@@ -82,7 +84,18 @@ def _build_text() -> tuple[bytearray, dict[str, int], int]:
 
     # leaf code: same shape, but no RUNTIME_FUNCTION will cover it
     placed["leaf mov rax, [rip+d]"] = LEAF_RVA
-    text[LEAF_RVA - TEXT_RVA:] = _rip_bytes(LEAF_RVA, b"\x48\x8B\x05", b"", TARGET_RVA)
+    leaf = _rip_bytes(LEAF_RVA, b"\x48\x8B\x05", b"", TARGET_RVA)
+    text[LEAF_RVA - TEXT_RVA:LEAF_RVA - TEXT_RVA + len(leaf)] = leaf
+
+    # An inline-constructed string. The compiler materialises INLINE_TEXT from
+    # immediates instead of pointing at .rdata, so the characters are split by the
+    # opcode bytes carrying them and the full string appears contiguously *nowhere*
+    # in the image. That is the case every contiguous-bytes locator misses.
+    placed[f"inline {INLINE_TEXT}"] = INLINE_RVA
+    raw = INLINE_TEXT.encode("utf-8")
+    inline = (b"\x48\xB8" + raw[:8]           # movabs rax, imm64 -> "AudioBuf"
+              + b"\xB8" + raw[8:] + b"\x00")  # mov eax, imm32    -> "fer\0"
+    text[INLINE_RVA - TEXT_RVA:INLINE_RVA - TEXT_RVA + len(inline)] = inline
 
     return text, placed, func_end
 
