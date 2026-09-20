@@ -454,6 +454,22 @@ def binary_callers(
 
 
 @mcp.tool()
+def binary_vtable(binary_path: str, target_rva: int) -> dict[str, Any]:
+    """Which vtable holds a virtual method, at which slot index, and for which class.
+    Pass the RVA of the method BODY. Returns one record per containing table with
+    slot_rva, slot_index, vtable_rva, entries, section, rtti (MSVC class name when the
+    build kept RTTI - absent for -fno-rtti builds such as Chromium) and vtable_refs (the
+    constructors that install the table, which is the route to the class when RTTI is
+    stripped). NOTE the reverse direction is NOT statically decidable: a slot offset such
+    as 0x1f8 taken from a dispatch site cannot be narrowed to one class, because the
+    object's dynamic type is not in the instruction stream - searching [reg+0x1f8]
+    matches hundreds of unrelated classes. Always start from the implementation."""
+    return _dispatch("binary_vtable", {
+        "binary_path": binary_path, "target_rva": target_rva,
+    })
+
+
+@mcp.tool()
 def binary_index_build(
     binary_path: str, section: str = ".text", target_sections: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -635,7 +651,19 @@ def _generate_hook_script(
     if log_args:
         on_enter.append("      info.args = [args[0], args[1], args[2], args[3]].map(a => a ? a.toString() : 'null');")
     if log_backtrace:
-        on_enter.append("      info.backtrace = Thread.backtrace(this.context, Backtracer.ACCURATE).map(DebugSymbol.fromAddress).map(s => s.toString());")
+        # Backtracer.ACCURATE walks unwind info (.pdata RUNTIME_FUNCTIONs on Windows
+        # x64). A leaf function without an entry yields an empty or single-frame stack,
+        # which reads as "called from nowhere" — the same root cause that makes
+        # this.returnAddress unreliable on a tiny leaf. Fall back to FUZZY so caller
+        # attribution degrades to "plausible" instead of "missing", and label which
+        # backtracer produced the frames so the result is not silently trusted.
+        on_enter.append("      const _acc = Thread.backtrace(this.context, "
+                        "Backtracer.ACCURATE);")
+        on_enter.append("      const _frames = _acc.length > 1 ? _acc : "
+                        "Thread.backtrace(this.context, Backtracer.FUZZY);")
+        on_enter.append("      info.backtracer = _acc.length > 1 ? 'accurate' : 'fuzzy';")
+        on_enter.append("      info.backtrace = _frames.map(DebugSymbol.fromAddress)"
+                        ".map(s => s.toString());")
     on_enter.append("      this._info = info;")
     on_enter.append("      send(info);")
     on_enter.append("    },")
@@ -1045,6 +1073,10 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
         from fridapilot.tools.pe_rva import function_xrefs
         return function_xrefs(arguments["binary_path"], int(arguments["target_rva"]),
                               follow=bool(arguments.get("follow", False)))
+
+    if name == "binary_vtable":
+        from fridapilot.tools.pe_rva import vtable_of_function
+        return vtable_of_function(arguments["binary_path"], int(arguments["target_rva"]))
 
     if name == "binary_index_build":
         from fridapilot.tools.rip_index import build_rip_index

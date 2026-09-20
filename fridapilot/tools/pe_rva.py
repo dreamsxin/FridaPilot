@@ -8,9 +8,9 @@ vs raw offset ``0x600`` — rip-relative references and call/jmp targets resolve
 garbage, which silently misleads reverse engineering.
 
 This module maps between RVA / VA / file offset through the PE section table so
-disassembly, string location and cross-references are accurate. It captures the
-general workflow used to reverse chrome.dll's fingerprint logic and is reusable
-for any large, non-trivially-laid-out PE.
+disassembly, string location and cross-references are accurate. Examples name
+``chrome.dll`` because that is the shape of PE it was built for; nothing in the
+module is specific to it.
 
 No LLM dependency. Requires: pefile, capstone.
 """
@@ -516,6 +516,23 @@ def field_refs(
             out.append({"from_rva": rva, "mnemonic": mnem,
                         "op_str": "[reg+0x%x]" % offset, "size": 0,
                         "kind": "write" if is_w else "read"})
+
+    # A struct offset only identifies a field if it is rare. Hundreds of hits mean the
+    # offset is shared by unrelated classes and the result is noise, not an answer —
+    # measured: one vtable slot offset produced 200+ hits across a Chromium DLL, almost
+    # all from other types. Say so rather than handing back a list that looks like
+    # progress. Nothing can fix this by filtering: the dispatch site does not know the
+    # object's dynamic type, so `[reg+off]` cannot be narrowed to one class. Anchor on
+    # something unambiguous instead (a string, a called function, a vtable identity via
+    # vtable_of_function), or settle it at runtime by behavioural comparison.
+    if len(out) > 100:
+        logger.warning(
+            "%d matches for [reg+0x%x] — this offset is not discriminating. Unrelated "
+            "classes share struct and vtable-slot offsets, and a dispatch site carries "
+            "no type information, so this cannot be narrowed by filtering. If 0x%x is a "
+            "vtable slot, start from the implementation (vtable_of_function) instead; "
+            "otherwise anchor on a string or a call and confirm at runtime",
+            len(out), offset, offset)
     return out
 
 
@@ -1037,8 +1054,8 @@ def function_xrefs(
     and the empty answer means nothing:
 
     * C++ virtual methods are dispatched through a vtable;
-    * Blink IDL methods (``HTMLCanvasElement::toDataURL`` and every other bound Web
-      API) are invoked by the V8 binding layer out of a generated method table;
+    * methods bound into a scripting engine (Blink/V8-style IDL bindings and any
+      comparable generated binding layer) are invoked out of a generated method table;
     * imported functions go through a thunk table;
     * callbacks are passed as addresses and called later.
 
@@ -1146,6 +1163,142 @@ def function_xrefs(
     }
 
 
+# ── vtables ─────────────────────────────────────────────────────────────────
+
+def _is_code_ptr(img: PEImage, va: int) -> bool:
+    """Does this VA point into an executable section of this image?"""
+    if va < img.image_base:
+        return False
+    return img.is_executable(img.section_of(va - img.image_base) or "")
+
+
+def _decode_msvc_rtti(img: PEImage, vtable_rva: int) -> dict[str, Any] | None:
+    """Read the MSVC RTTI class name from the qword just below a vtable.
+
+    MSVC x64 stores a ``_RTTICompleteObjectLocator*`` at ``vtable - 8``:
+    ``{signature, offset, cdOffset, pTypeDescriptor(RVA), pClassDescriptor(RVA),
+    pSelf(RVA)}``, and the TypeDescriptor's mangled name starts 16 bytes into it.
+
+    Returns None when RTTI is absent — the *normal* case for Chromium and anything
+    else built with ``-fno-rtti``. Absence is a fact about the build, not an error.
+    """
+    import struct
+
+    blob = img.read_rva(vtable_rva - 8, 8)
+    if blob is None or len(blob) < 8:
+        return None
+    locator_va = struct.unpack("<Q", blob)[0]
+    if locator_va < img.image_base:
+        return None
+    loc = img.read_rva(locator_va - img.image_base, 16)
+    if loc is None or len(loc) < 16:
+        return None
+    signature, _offset, _cd_offset, type_desc_rva = struct.unpack("<IIII", loc)
+    if signature not in (0, 1) or not type_desc_rva:
+        return None
+    # TypeDescriptor: pVFTable(8) + spare(8) + name[]
+    name_blob = img.read_rva(type_desc_rva + 16, 512)
+    if not name_blob:
+        return None
+    raw = name_blob.split(b"\x00", 1)[0]
+    if not raw.startswith(b".?A"):          # every MSVC type descriptor name does
+        return None
+    return {"mangled": raw.decode("latin1"), "type_descriptor_rva": type_desc_rva}
+
+
+def vtable_of_function(
+    binary_path: str | Path,
+    func_rva: int,
+    max_entries: int = 4096,
+) -> list[dict[str, Any]]:
+    """Given a virtual method body, find the vtable(s) holding it and its slot index.
+
+    This is the direction of the vtable question that is statically decidable, and it
+    is worth being explicit that **the other direction is not**. At a dispatch site
+
+        mov rax, [rcx]          ; vtable out of the object
+        mov rax, [rax+0x1f8]    ; slot 63
+        call __guard_dispatch_icall_fptr
+
+    the displacement ``0x1f8`` carries no information about which class is being
+    dispatched: the dynamic type lives in the object at runtime, not in the
+    instruction stream. Searching ``[reg+0x1f8]`` over a Chromium-sized DLL therefore
+    returns hundreds of hits from unrelated classes, and no filter can fix that —
+    measured: 200+ hits for one slot offset, almost all noise. Start from the
+    implementation instead, which is unambiguous.
+
+    Method: find every data-section qword holding ``ImageBase + func_rva`` (one
+    ``bytes.find`` pass), then grow a run of consecutive code pointers around each hit
+    to recover the table's extent. The slot index is ``(hit - table_start) / 8``.
+    MSVC RTTI below the table gives the class name outright when the build kept it.
+
+    Returns one record per containing table:
+        {slot_rva, slot_index, vtable_rva, entries, section, rtti, vtable_refs}
+    ``vtable_refs`` are rip-relative references to the table start — the constructors
+    that install it, which is how you identify the class when RTTI is absent.
+    """
+    import struct
+
+    img = PEImage(binary_path)
+    if not img.is_executable(img.section_of(func_rva) or ""):
+        raise ValueError(
+            f"0x{func_rva:x} is not in an executable section; vtable_of_function "
+            "expects the address of a function body")
+
+    target_va = img.image_base + func_rva
+    needle = struct.pack("<Q", target_va)
+    out: list[dict[str, Any]] = []
+
+    for name, lo, hi in img.data_sections():
+        blob = img.read_rva(lo, hi - lo)
+        if blob is None:
+            continue
+        for i in _find_all(blob, needle):
+            if i % 8:
+                # A vtable slot is qword-aligned; an unaligned hit is a coincidence
+                # inside other data, not a table entry.
+                continue
+
+            # Grow a run of consecutive code pointers around the hit. A vtable is a
+            # dense run of them, and the run ends at the RTTI pointer / padding / the
+            # next table, so this recovers the extent without needing symbols.
+            start = i
+            while start >= 8 and (start - i) // 8 > -max_entries:
+                prev = struct.unpack_from("<Q", blob, start - 8)[0]
+                if not _is_code_ptr(img, prev):
+                    break
+                start -= 8
+            end = i + 8
+            while end + 8 <= len(blob) and (end - i) // 8 < max_entries:
+                nxt = struct.unpack_from("<Q", blob, end)[0]
+                if not _is_code_ptr(img, nxt):
+                    break
+                end += 8
+
+            vtable_rva = lo + start
+            slot_rva = lo + i
+            entries = (end - start) // 8
+            refs = xrefs_to_rva(binary_path, vtable_rva, kinds=("rip",),
+                                diagnose=False)
+            out.append({
+                "slot_rva": slot_rva,
+                "slot_index": (i - start) // 8,
+                "vtable_rva": vtable_rva,
+                "entries": entries,
+                "section": name,
+                "rtti": _decode_msvc_rtti(img, vtable_rva),
+                "vtable_refs": [r["from_rva"] for r in refs],
+            })
+
+    out.sort(key=lambda r: r["slot_rva"])
+    if not out:
+        logger.warning(
+            "0x%x does not appear in any data-section pointer run, so it is not in a "
+            "vtable: it is either called directly (see function_xrefs) or its address "
+            "is only ever computed at runtime", func_rva)
+    return out
+
+
 # ── inline (immediate-encoded) strings ──────────────────────────────────────
 
 # MOV r64, imm64 is `REX.W B8+r`; with REX.B for r8-r15 the prefix is 0x49.
@@ -1185,8 +1338,8 @@ def find_inline_strings(
 
     * ``find_string_rvas`` / ``find_text`` / ``search_bytes`` search for contiguous
       bytes, and the string is **not contiguous** — the immediates are separated by
-      the opcode bytes of the instructions carrying them. ``b"AudioBuffer"`` is
-      emitted as ``48 B8 'AudioBuf' | B8 'fer' 00``, so a search for the 11 bytes
+      the opcode bytes of the instructions carrying them. ``b"ConfigValue"`` is
+      emitted as ``48 B8 'ConfigVa' | B8 'lue' 00``, so a search for the 11 bytes
       finds nothing while a search for the first 8 succeeds. Strings of exactly 8
       bytes are the one length where a plain search happens to work, which is how
       this gap stayed hidden.

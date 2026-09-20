@@ -22,23 +22,27 @@ from __future__ import annotations
 import logging
 import struct
 import sys
+from pathlib import Path
 
 import pytest
 
 from fridapilot.tools.pe_rva import (
     PEImage,
+    field_refs,
     find_inline_strings,
     find_string_rvas,
     function_bounds,
     function_xrefs,
     map_refs_to_functions,
     section_range,
+    vtable_of_function,
     xrefs_to_rva,
 )
 
 
 from .synthetic_pe import (
     CALL_TARGET_RVA,
+    CTOR_RVA,
     DISPATCH_RVA,
     IMAGE_BASE,
     INDIRECT_FN_RVA,
@@ -47,11 +51,15 @@ from .synthetic_pe import (
     PTR_RVA,
     RDATA_RVA,
     RIP_FORMS,
+    RTTI_CLASS_NAME,
     TARGET_RVA,
     TEXT_RVA,
     TEXT_VSIZE,
     LEAF_RVA,
     UNWIND_RVA,
+    VTABLE_ENTRIES,
+    VTABLE_RVA,
+    VTABLE_SLOT_INDEX,
     VTABLE_SLOT_RVA,
     write_synthetic_pe,
 )
@@ -378,8 +386,8 @@ def test_find_inline_strings_rejects_text_too_short_to_identify(fixture_pe):
 #
 # The failure these pin: asking "who calls this function" about a callee that is only
 # ever reached through a pointer table returns 0, and 0 looks exactly like dead code.
-# Real case: HTMLCanvasElement::toDataURL is invoked by the V8 IDL binding layer out of
-# a generated method table, so .text contains no call to it at all.
+# This is the shape of every C++ virtual method, every IDL/binding-table entry that a
+# script engine dispatches, and every import thunk.
 
 
 def test_call_jmp_scan_cannot_see_an_indirect_only_callee(fixture_pe):
@@ -389,9 +397,11 @@ def test_call_jmp_scan_cannot_see_an_indirect_only_callee(fixture_pe):
     direct = xrefs_to_rva(path, INDIRECT_FN_RVA, kinds=("call", "jmp"), diagnose=False)
     assert direct == [], "fixture must have no direct branch to the indirect callee"
 
-    # The address is not absent from the image, only from the code section.
+    # The address is not absent from the image, only from the code section: it sits in
+    # the lone slot and in the real vtable.
     slots = xrefs_to_rva(path, INDIRECT_FN_RVA, section=".rdata", kinds=("ptr",))
-    assert [s["from_rva"] for s in slots] == [VTABLE_SLOT_RVA]
+    assert [s["from_rva"] for s in slots] == [
+        VTABLE_SLOT_RVA, VTABLE_RVA + VTABLE_SLOT_INDEX * 8]
 
 
 def test_empty_call_scan_on_a_code_target_explains_itself(fixture_pe, caplog):
@@ -409,8 +419,9 @@ def test_function_xrefs_finds_the_pointer_slot_and_says_so(fixture_pe):
 
     assert res["target_is_code"] is True
     assert res["direct"] == []
-    assert [r["from_rva"] for r in res["indirect"]] == [VTABLE_SLOT_RVA]
-    assert [r["section"] for r in res["indirect"]] == [".rdata"]
+    assert [r["from_rva"] for r in res["indirect"]] == [
+        VTABLE_SLOT_RVA, VTABLE_RVA + VTABLE_SLOT_INDEX * 8]
+    assert {r["section"] for r in res["indirect"]} == {".rdata"}
     # The verdict is the deliverable: it must distinguish this from "unreferenced".
     assert "dispatched indirectly" in res["verdict"]
 
@@ -459,5 +470,83 @@ def test_absolute_kind_scan_agrees_with_the_byte_walk_it_replaced(fixture_pe):
            xrefs_to_rva(path, TARGET_RVA, section=".rdata", kinds=("ptr",))}
     assert got == expected
     assert needle in blob and PTR_RVA in got
+
+
+# ── vtables ─────────────────────────────────────────────────────────────────
+#
+# The decidable direction. Going the other way - from a slot offset like [reg+0x1f8]
+# to the class being dispatched - is not decidable statically, because the dispatch
+# site carries no type information; measured, one slot offset matched 200+ sites in a
+# Chromium-sized DLL. field_refs therefore warns instead of pretending the list is an
+# answer.
+
+
+def test_vtable_of_function_recovers_slot_index_and_extent(fixture_pe):
+    path, _placed, _end = fixture_pe
+    tables = vtable_of_function(path, INDIRECT_FN_RVA)
+
+    real = [t for t in tables if t["entries"] == VTABLE_ENTRIES]
+    assert len(real) == 1, [(hex(t["vtable_rva"]), t["entries"]) for t in tables]
+    t = real[0]
+    assert t["vtable_rva"] == VTABLE_RVA
+    assert t["slot_index"] == VTABLE_SLOT_INDEX
+    assert t["slot_rva"] == VTABLE_RVA + VTABLE_SLOT_INDEX * 8
+    assert t["section"] == ".rdata"
+
+
+def test_vtable_of_function_reads_the_msvc_rtti_class_name(fixture_pe):
+    path, _placed, _end = fixture_pe
+    t = [x for x in vtable_of_function(path, INDIRECT_FN_RVA)
+         if x["vtable_rva"] == VTABLE_RVA][0]
+    assert t["rtti"] is not None, "RTTI locator sits at vtable-8 in the fixture"
+    assert t["rtti"]["mangled"] == RTTI_CLASS_NAME
+
+
+def test_vtable_of_function_reports_the_constructor_that_installs_the_table(fixture_pe):
+    """With RTTI stripped these refs are the only route back to the owning class."""
+    path, _placed, _end = fixture_pe
+    t = [x for x in vtable_of_function(path, INDIRECT_FN_RVA)
+         if x["vtable_rva"] == VTABLE_RVA][0]
+    assert CTOR_RVA in t["vtable_refs"], [hex(r) for r in t["vtable_refs"]]
+
+
+def test_vtable_of_function_separates_a_lone_pointer_from_a_real_table(fixture_pe):
+    """The same address also sits in an isolated slot; entries tells them apart."""
+    path, _placed, _end = fixture_pe
+    lone = [t for t in vtable_of_function(path, INDIRECT_FN_RVA)
+            if t["slot_rva"] == VTABLE_SLOT_RVA]
+    assert len(lone) == 1
+    assert lone[0]["entries"] == 1
+    assert lone[0]["rtti"] is None
+
+
+def test_vtable_of_function_rejects_a_data_address(fixture_pe):
+    path, _placed, _end = fixture_pe
+    with pytest.raises(ValueError, match="not in an executable section"):
+        vtable_of_function(path, TARGET_RVA)
+
+
+def test_field_refs_warns_when_the_offset_cannot_discriminate(fixture_pe, caplog):
+    """Hundreds of hits is not an answer; the tool has to say so."""
+    path, _placed, _end = fixture_pe
+    img = PEImage(path)
+    lo, hi = img.section_range(".text")
+
+    # 150 copies of `mov rax, [rcx+0x1f8]` — the shape that produced 200+ unrelated
+    # hits on a real Chromium-sized DLL. Written to a scratch image so the shared
+    # fixture is intact.
+    insn = b"\x48\x8B\x81" + struct.pack("<i", 0x1F8)
+    data = bytearray(Path(path).read_bytes())
+    off = img.rva_to_off(lo + 0x100)
+    data[off:off + len(insn) * 150] = insn * 150
+    noisy = Path(path).with_name("noisy.dll")
+    noisy.write_bytes(bytes(data))
+
+    with caplog.at_level(logging.WARNING, logger="fridapilot.tools.pe_rva"):
+        hits = field_refs(str(noisy), 0x1F8, lo, hi, kind="read")
+    assert len(hits) > 100
+    assert "not discriminating" in caplog.text
+    assert "vtable_of_function" in caplog.text
+
 
 

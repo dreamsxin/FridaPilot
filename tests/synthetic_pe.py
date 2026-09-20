@@ -29,10 +29,20 @@ GBK_TEXT = "\u914d\u7f6e\u5df2\u52a0\u8f7d"
 CALL_TARGET_RVA = TEXT_RVA + 0x200
 LEAF_RVA = TEXT_RVA + 0x300      # deliberately outside every .pdata entry
 INLINE_RVA = TEXT_RVA + 0x340    # string built in registers; no .rdata copy exists
-INLINE_TEXT = "AudioBuffer"      # 11 bytes -> movabs imm64 + mov imm32, never contiguous
+INLINE_TEXT = "ConfigValue"     # 11 bytes -> movabs imm64 + mov imm32, never contiguous
 INDIRECT_FN_RVA = TEXT_RVA + 0x380   # function nothing ever call/jmps to directly
 VTABLE_SLOT_RVA = RDATA_RVA + 0x80   # ...its address lives here instead
 DISPATCH_RVA = TEXT_RVA + 0x3A0      # ...and this is the code that loads the slot
+
+# A real vtable: RTTI locator at VTABLE_RVA-8, then VTABLE_ENTRIES code pointers.
+# INDIRECT_FN_RVA is installed at slot VTABLE_SLOT_INDEX so the slot index is checkable.
+VTABLE_RVA = RDATA_RVA + 0x100
+VTABLE_ENTRIES = 6
+VTABLE_SLOT_INDEX = 3
+RTTI_LOCATOR_RVA = RDATA_RVA + 0x180
+TYPE_DESCRIPTOR_RVA = RDATA_RVA + 0x1A0
+RTTI_CLASS_NAME = ".?AVSampleWidget@demo@@"
+CTOR_RVA = TEXT_RVA + 0x3B0      # lea rax, [rip+d] -> VTABLE_RVA (installs the table)
 UNWIND_RVA = 0x4000
 
 
@@ -113,6 +123,12 @@ def _build_text() -> tuple[bytearray, dict[str, int], int]:
     dispatch = _rip_bytes(DISPATCH_RVA, b"\xFF\x15", b"", VTABLE_SLOT_RVA)
     text[DISPATCH_RVA - TEXT_RVA:DISPATCH_RVA - TEXT_RVA + len(dispatch)] = dispatch
 
+    # The constructor side: takes the address of the vtable itself. When RTTI is
+    # stripped, these references are the only way back to the owning class.
+    placed["lea rax, [rip+d] -> vtable"] = CTOR_RVA
+    ctor = _rip_bytes(CTOR_RVA, b"\x48\x8D\x05", b"", VTABLE_RVA)
+    text[CTOR_RVA - TEXT_RVA:CTOR_RVA - TEXT_RVA + len(ctor)] = ctor
+
     return text, placed, func_end
 
 
@@ -126,6 +142,32 @@ def _build_image(func_end_rva: int, text: bytes) -> bytes:
     rdata[0x40:0x40 + len(gbk)] = gbk
     # the "vtable slot": the indirect callee's VA, its only appearance in the image
     rdata[0x80:0x88] = struct.pack("<Q", IMAGE_BASE + INDIRECT_FN_RVA)
+
+    # A real vtable, laid out the way MSVC does it:
+    #   vtable-8         -> _RTTICompleteObjectLocator*
+    #   vtable+8*i       -> virtual method i
+    # The qword below the table is deliberately NOT a code pointer, and neither is the
+    # one above the last entry, so the run-growing in vtable_of_function terminates on
+    # the real bounds instead of swallowing neighbouring data.
+    rdata[0xF8:0x100] = struct.pack("<Q", IMAGE_BASE + RTTI_LOCATOR_RVA)
+    slots = [TEXT_RVA, CALL_TARGET_RVA, LEAF_RVA,
+             INDIRECT_FN_RVA,                      # == VTABLE_SLOT_INDEX
+             DISPATCH_RVA, INLINE_RVA]
+    assert len(slots) == VTABLE_ENTRIES
+    assert slots[VTABLE_SLOT_INDEX] == INDIRECT_FN_RVA
+    for i, rva in enumerate(slots):
+        off = (VTABLE_RVA - RDATA_RVA) + i * 8
+        rdata[off:off + 8] = struct.pack("<Q", IMAGE_BASE + rva)
+
+    # _RTTICompleteObjectLocator: signature, offset, cdOffset, pTypeDescriptor,
+    # pClassDescriptor, pSelf - all RVAs on x64.
+    loc = RTTI_LOCATOR_RVA - RDATA_RVA
+    rdata[loc:loc + 24] = struct.pack(
+        "<IIIIII", 0, 0, 0, TYPE_DESCRIPTOR_RVA, 0, RTTI_LOCATOR_RVA)
+    # TypeDescriptor: pVFTable(8) + spare(8) + NUL-terminated mangled name
+    td = TYPE_DESCRIPTOR_RVA - RDATA_RVA
+    name = RTTI_CLASS_NAME.encode("ascii") + b"\x00"
+    rdata[td + 16:td + 16 + len(name)] = name
 
 
     # .pdata: two RUNTIME_FUNCTIONs, VirtualSize = 24. The raw section is padded

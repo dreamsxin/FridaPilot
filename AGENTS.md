@@ -158,6 +158,21 @@ If a signature changes, fix the docs in the same commit — the test will point 
   and refuses queries outside its recorded coverage, which is the only reason it is safe: a cache
   that answers beyond what it scanned reproduces the partial-scan false negative.
 
+- **A struct or vtable offset is not an identity.** `field_refs` on a vtable slot offset matched
+  200+ unrelated classes in one Chromium DLL. A dispatch site carries no type information — the
+  object's dynamic type is only known at runtime — so this cannot be narrowed by filtering and no
+  tool will fix it. Go the decidable direction with `pe_rva.vtable_of_function` (implementation →
+  table, slot index, MSVC RTTI name, installing constructors), or settle it at runtime by
+  behavioural comparison. `field_refs` warns above 100 hits instead of returning a list that looks
+  like progress. *(enforced:
+  `tests/test_pe_rva.py::test_field_refs_warns_when_the_offset_cannot_discriminate`)*
+- **A `.pdata`-less leaf also breaks runtime caller attribution.** `Backtracer.ACCURATE` walks
+  unwind info, so it yields an empty or single-frame stack there, and `Interceptor`'s trampoline
+  makes `this.returnAddress` report the hooked function's own address instead of the caller
+  (measured on a 2-instruction getter: it reported itself). The generated native hook falls back
+  to `Backtracer.FUZZY` and labels the result with `backtracer: 'accurate' | 'fuzzy'` so the
+  attribution is never trusted blindly. Run `function_bounds` on a hook target before relying on
+  its stack.
 - **"Who calls this function" is the wrong question for most C++ callees.** A virtual method, a
   Blink IDL / V8 binding-table entry, an import thunk and a stored callback are all reached
   through a pointer, so no `call`/`jmp` instruction anywhere in the image names them. Scanning a

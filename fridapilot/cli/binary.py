@@ -639,8 +639,8 @@ def field_refs_cmd(
     the moment it crosses a section boundary.
 
     Always sanity-check with a known reference first:
-      fp binary field-refs chrome.dll -o 0xB0 --kind read --start-rva 0xb029000 \\
-          --end-rva 0xb02a000        # must include the known read site
+      fp binary field-refs chrome.dll -o 0xB0 --kind read --start-rva 0x1c42000 \\
+          --end-rva 0x1c43f00        # must include the known read site
     """
 
     from fridapilot.tools.pe_rva import field_refs, function_bounds
@@ -818,8 +818,8 @@ def func_bounds_cmd(
     Instant and exact — beats scanning backwards for a prologue, which is
     unreliable on optimised code with shrink-wrapped or split prologues.
 
-    Example: you found a string xref at 0xd6ba5db and want the whole function:
-      fp binary func-bounds chrome.dll --rva 0xd6ba5db
+    Example: you found a string xref at 0x1c43550 and want the whole function:
+      fp binary func-bounds chrome.dll --rva 0x1c43550
       fp binary disasm-rva chrome.dll --rva <begin_rva> -n 400
     """
     from fridapilot.tools.pe_rva import function_bounds
@@ -884,13 +884,13 @@ def xrefs_rva_cmd(
 
     Examples:
       # whole .text, no addresses to look up
-      fp binary xrefs-rva chrome.dll --target 0xfae6439
+      fp binary xrefs-rva chrome.dll --target 0x2f10a40
 
       # string referenced only from a pointer table
-      fp binary xrefs-rva chrome.dll --target 0xfb3dfc0 --section .rdata --kinds ptr
+      fp binary xrefs-rva chrome.dll --target 0x2f11800 --section .rdata --kinds ptr
 
       # deliberately narrowed to one function (fast)
-      fp binary xrefs-rva chrome.dll --target 0xfae6439 --start 0xc42a90 --end 0xc43f95
+      fp binary xrefs-rva chrome.dll --target 0x2f10a40 --start 0x1c42000 --end 0x1c43f00
     """
     from fridapilot.tools.pe_rva import section_range, xrefs_to_rva
 
@@ -945,6 +945,74 @@ def xrefs_rva_cmd(
                           "(use inline-strings instead).[/dim]")
 
 
+@binary_app.command("vtable")
+def vtable_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file."),
+    target: str = typer.Option(..., "--target", "-t",
+                               help="RVA of the virtual method BODY (not a slot)."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Which vtable holds this method, at which slot, and for which class.
+
+    This is the decidable direction of the vtable question. The reverse — taking a
+    slot offset such as 0x1f8 from a dispatch site and asking which class it belongs
+    to — is NOT decidable statically: the object's dynamic type is not in the
+    instruction stream, so `field-refs --offset 0x1f8` matches unrelated classes
+    (measured: 200+ hits in one Chromium-sized DLL). Start from the implementation.
+
+    Examples:
+      fp binary vtable target.dll --target 0x4f1a20
+      fp binary vtable target.dll --target 0x4f1a20 --json
+    """
+    from fridapilot.tools.pe_rva import vtable_of_function
+
+    filepath = Path(binary)
+    if not filepath.exists():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        tables = vtable_of_function(binary, int(target, 0))
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    if json_output:
+        _emit_json(tables)
+        return
+
+    if not tables:
+        console.print(f"[yellow]0x{int(target, 0):x} is in no pointer table.[/yellow]")
+        console.print("[dim]  It is probably called directly — try "
+                      f"`fp binary callers {binary} --target {target}`.[/dim]")
+        return
+
+    table = Table(title=f"Tables containing 0x{int(target, 0):x} ({len(tables)})")
+    table.add_column("Table RVA", style="cyan")
+    table.add_column("Slot", justify="right")
+    table.add_column("Entries", justify="right")
+    table.add_column("Section")
+    table.add_column("RTTI class", style="green")
+    table.add_column("Installed by", style="dim")
+    for t in tables:
+        rtti = t["rtti"]["mangled"] if t["rtti"] else "-"
+        refs = ", ".join(f"0x{r:x}" for r in t["vtable_refs"][:3]) or "-"
+        if len(t["vtable_refs"]) > 3:
+            refs += f" (+{len(t['vtable_refs']) - 3})"
+        table.add_row(f"0x{t['vtable_rva']:08x}", f"#{t['slot_index']}",
+                      str(t["entries"]), t["section"], escape(rtti), refs)
+    console.print(table)
+
+    if all(t["rtti"] is None for t in tables):
+        console.print("[dim]No RTTI (normal for -fno-rtti builds such as Chromium). The "
+                      "'Installed by' constructors are the route to the class name: "
+                      "disassemble them and look at the other members they touch.[/dim]")
+    lone = [t for t in tables if t["entries"] == 1]
+    if lone:
+        console.print(f"[dim]{len(lone)} single-entry table(s): an isolated function "
+                      "pointer (callback / thunk), not a vtable.[/dim]")
+
+
 @binary_app.command("callers")
 def callers_cmd(
     binary: str = typer.Argument(..., help="Path to PE file."),
@@ -960,15 +1028,15 @@ def callers_cmd(
     """Who reaches this function — direct call/jmp AND pointer-table entries.
 
     `xrefs-rva --kinds call,jmp` only answers "who branches straight to this address".
-    Virtual methods, Blink IDL methods, import thunks and callbacks have no such
-    instruction anywhere: the only occurrence of their address is an 8-byte pointer in
-    a data section. Asking "who calls it" then returns 0 whether the function is hot
+    Virtual methods, script-binding table entries, import thunks and callbacks have no
+    such instruction anywhere: the only occurrence of their address is an 8-byte pointer
+    in a data section. Asking "who calls it" then returns 0 whether the function is hot
     or dead. This command scans every code section for branches and every data section
     for pointers, and states which case it found.
 
     Examples:
-      fp binary callers chrome.dll --target 0xb029cc0
-      fp binary callers chrome.dll --target 0xb029cc0 --follow --json
+      fp binary callers target.dll --target 0x4f1a20
+      fp binary callers target.dll --target 0x4f1a20 --follow --json
     """
     from fridapilot.tools.pe_rva import function_xrefs
 

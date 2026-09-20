@@ -25,8 +25,9 @@ Every snippet and command below is checked against the real signatures and the r
 by `tests/test_docs.py`. If you change `pe_rva.py` or `cli/binary.py`, that test tells you
 which lines here went stale.
 
-> Addresses in the examples (`0xfcae886`, `0x1044f64c`, …) are **placeholders**, not measured
-> values from any particular build. Always resolve real RVAs with `find-string-rva` first.
+> The addresses in the examples (`0x2f10a40`, `0x1c43500`, …) are **placeholders**, not measured
+> values from any particular build — `chrome.dll` is just a stand-in for "a large Chromium-style
+> PE". Resolve real RVAs yourself with `find-string-rva` / `func-bounds` first.
 
 ## Install
 
@@ -110,7 +111,7 @@ from fridapilot.tools.pe_rva import (
 ### find_string_rvas — locate strings
 
 ```python
-results = find_string_rvas("chrome.dll", ["enableCanvasNoise", "webglRenderer"])
+results = find_string_rvas("chrome.dll", ["enableTelemetry", "deviceModelName"])
 results = find_string_rvas("chrome.dll", ["宽字符"], encoding="utf16le")
 ```
 
@@ -120,7 +121,7 @@ row, with `offset` and `rva` set to `None`. Every occurrence is reported, so a s
 appears twice yields two rows.
 
 ```bash
-fp binary find-string-rva chrome.dll "enableCanvasNoise,webglRenderer"
+fp binary find-string-rva chrome.dll "enableTelemetry,deviceModelName"
 fp binary find-string-rva chrome.dll "宽字符" --encoding utf16le --json
 ```
 
@@ -165,14 +166,56 @@ fp binary search-bytes app.exe "48 8b ?? 48 89" --limit 20
 input, so a hit feeds `func-bounds` / `xrefs-rva` without manual conversion. Offsets inside the
 headers map to themselves and are labelled `(headers)`.
 
+### vtable_of_function — which table holds this method, at which slot, for which class
+
+Only the direction **implementation → vtable** is statically decidable. The reverse is the most
+expensive wrong turn available here:
+
+```asm
+mov rax, [rcx]          ; vtable out of the object
+mov rax, [rax+0x1f8]    ; slot 63
+call __guard_dispatch_icall_fptr
+```
+
+`0x1f8` says nothing about *which* class is dispatched — the dynamic type lives in the object at
+runtime, not in the instruction stream. Searching `[reg+0x1f8]` across a Chromium-sized DLL
+returns **200+ hits from unrelated classes**, and no filter narrows it, because the information is
+not there. `field_refs` now warns when the match count is that high instead of handing back a list
+that looks like progress.
+
+```python
+from fridapilot.tools.pe_rva import vtable_of_function
+
+tables = vtable_of_function("chrome.dll", 0x4f1a20)   # the method BODY, not a slot
+```
+
+<!-- return-keys: vtable_of_function = slot_rva, slot_index, vtable_rva, entries, section, rtti, vtable_refs -->
+One record per containing table: `slot_rva`, `slot_index`, `vtable_rva`, `entries`, `section`,
+`rtti`, `vtable_refs`.
+
+- `slot_index` answers "which slot number is this?" — computed from the recovered table start,
+  not guessed. The extent comes from growing a run of consecutive code pointers around the hit.
+- `rtti.mangled` gives the class outright (an MSVC mangled name such as `.?AVWidget@app@@`) when
+  the build kept RTTI. Chromium-based binaries are built with `-fno-rtti`, so expect `None`
+  there — that is a fact about the build, not a failure.
+- `vtable_refs` are the rip-relative references to the table start, i.e. the constructors that
+  install it. With RTTI stripped these are the route to the class: disassemble one and look at
+  the other members it initialises.
+- `entries == 1` means an isolated function pointer (a callback or thunk), not a vtable.
+
+```bash
+fp binary vtable chrome.dll --target 0x4f1a20
+fp binary vtable chrome.dll --target 0x4f1a20 --json
+```
+
 ### function_xrefs — who reaches a function (direct *and* indirect)
 
 **For a code target, use this instead of `xrefs_to_rva(kinds=("call","jmp"))`.** "Who branches
 to this address" is the wrong question for a large class of real callees:
 
 - C++ virtual methods are dispatched through a vtable;
-- Blink IDL methods — `HTMLCanvasElement::toDataURL` and every other bound Web API — are invoked
-  by the V8 binding layer out of a generated method table;
+- methods bound into a scripting engine (Blink/V8-style IDL bindings, and any comparable
+  generated binding layer) are invoked out of a generated method table;
 - imports go through a thunk table; callbacks are stored and called later.
 
 For all of those the only occurrence of the function's address in the image is an 8-byte pointer
@@ -182,8 +225,8 @@ function exactly as it would for dead code.
 ```python
 from fridapilot.tools.pe_rva import function_xrefs
 
-res = function_xrefs("chrome.dll", 0xb029cc0)
-res = function_xrefs("chrome.dll", 0xb029cc0, follow=True)   # + the dispatch sites
+res = function_xrefs("chrome.dll", 0x4f2b80)
+res = function_xrefs("chrome.dll", 0x4f2b80, follow=True)   # + the dispatch sites
 ```
 
 <!-- return-keys: function_xrefs = target_rva, target_section, target_is_code, direct, indirect, dispatchers, scanned, verdict -->
@@ -203,8 +246,8 @@ Read `verdict` first — it is there because the number that needs interpreting 
 Both section classes are always swept whole, so this answer is never range-limited.
 
 ```bash
-fp binary callers chrome.dll --target 0xb029cc0
-fp binary callers chrome.dll --target 0xb029cc0 --follow
+fp binary callers chrome.dll --target 0x4f2b80
+fp binary callers chrome.dll --target 0x4f2b80 --follow
 ```
 
 `xrefs-rva` now also refuses to be silent about this: 0 hits on an address in an executable
@@ -221,13 +264,13 @@ prints the scanned extent with its percentage.
 ```python
 from fridapilot.tools.pe_rva import section_range
 
-refs = xrefs_to_rva("chrome.dll", 0x1044f64c)                    # whole .text
-refs = xrefs_to_rva("chrome.dll", 0xfb3dfc0, section=".rdata", kinds=("ptr",))
+refs = xrefs_to_rva("chrome.dll", 0x2f10a40)                      # whole .text
+refs = xrefs_to_rva("chrome.dll", 0x2f11800, section=".rdata", kinds=("ptr",))
 refs = xrefs_to_rva(                                             # deliberately narrowed
     "chrome.dll",
-    target_rva=0x1044f64c,
-    scan_start_rva=0xc42a90,
-    scan_end_rva=0xc43f95,
+    target_rva=0x2f10a40,
+    scan_start_rva=0x1c42000,
+    scan_end_rva=0x1c43f00,
     kinds=("rip", "call", "jmp"),
     verify=True,
     scan_gaps=True,
@@ -247,8 +290,8 @@ Kinds: `rip` (rip-relative memory operand), `call` (`E8 rel32`), `jmp` (`E9 rel3
 the array base, so individual strings have no rip reference at all. If `rip` finds nothing for
 a string that is obviously used, rescan `.rdata` with `kinds=("ptr",)`.
 
-If that also finds nothing, the string may be **built inline** — Chromium emits
-`movabs rcx, 0x6573696f4e747865` ("extNoise") and assembles it in registers, so there is no
+If that also finds nothing, the string may be **built inline** — the compiler emits
+`movabs rcx, 0x6567617373654d` ("Message") and assembles it in registers, so there is no
 operand pointing at `.rdata` to find. `xrefs_to_rva` structurally cannot find it (there is no
 target RVA), and **neither can a contiguous byte search**: use `find_inline_strings` (below).
 
@@ -257,7 +300,7 @@ target RVA), and **neither can a contiguous byte search**: use `find_inline_stri
 ```python
 from fridapilot.tools.pe_rva import find_inline_strings
 
-sites = find_inline_strings("chrome.dll", "AudioBuffer")
+sites = find_inline_strings("chrome.dll", "ConfigValue")
 sites = find_inline_strings("chrome.dll", "\u8bb8\u53ef", encoding="gbk", section=".text")
 ```
 
@@ -267,11 +310,11 @@ Rows: `text`, `from_rva` (the carrying instruction, ready for `disasm-rva`), `se
 `func_end_rva`. Best coverage first.
 
 Why a plain search cannot do this: an inline string is materialised 8 bytes at a time, so the
-characters are separated by the opcode bytes carrying them. `b"AudioBuffer"` (11 bytes) becomes
+characters are separated by the opcode bytes carrying them. `b"ConfigValue"` (11 bytes) becomes
 
 ```
-48 B8 41 75 64 69 6F 42 75 66    movabs rax, imm64   -> "AudioBuf"
-B8 66 65 72 00                   mov eax, imm32      -> "fer\0"
+48 B8 43 6F 6E 66 69 67 56 61    movabs rax, imm64   -> "ConfigVa"
+B8 6C 75 65 00                   mov eax, imm32      -> "lue\0"
 ```
 
 The 11 bytes appear contiguously **nowhere** in the image, so `find_string_rvas`, `find_text` and
@@ -284,8 +327,8 @@ first 8 bytes, then confirms the remaining groups within `window` bytes.
 before believing it. `coverage == 1.0` means every group was accounted for.
 
 ```bash
-fp binary inline-strings chrome.dll --text AudioBuffer
-fp binary inline-strings chrome.dll --text AudioBuffer --confirmed --json
+fp binary inline-strings chrome.dll --text ConfigValue
+fp binary inline-strings chrome.dll --text ConfigValue --confirmed --json
 fp binary inline-strings app.exe --text 许可过期 --encoding gbk
 ```
 
@@ -310,16 +353,16 @@ cost of missing references outside known functions — and it skips leaf functio
 small wrapper that touches the target will not show up.
 
 ```bash
-fp binary xrefs-rva chrome.dll --target 0x1044f64c
-fp binary xrefs-rva chrome.dll --target 0xfb3dfc0 --section .rdata --kinds ptr
-fp binary xrefs-rva chrome.dll --target 0x1044f64c --start 0xc42a90 --end 0xc43f95
+fp binary xrefs-rva chrome.dll --target 0x2f10a40
+fp binary xrefs-rva chrome.dll --target 0x2f11800 --section .rdata --kinds ptr
+fp binary xrefs-rva chrome.dll --target 0x2f10a40 --start 0x1c42000 --end 0x1c43f00
 ```
 
 
 ### function_bounds — exact function extent
 
 ```python
-bounds = function_bounds("chrome.dll", 0xc43500)   # any RVA inside the function
+bounds = function_bounds("chrome.dll", 0x1c43500)   # any RVA inside the function
 ```
 
 <!-- return-keys: function_bounds = begin_rva, end_rva, size, unwind_info_rva -->
@@ -329,15 +372,15 @@ and for anything in a 32-bit image, where there is no `.pdata` at all. `None` th
 "no entry", not "not a function".
 
 ```bash
-fp binary func-bounds chrome.dll --rva 0xc43500
+fp binary func-bounds chrome.dll --rva 0x1c43500
 ```
 
 ### disassemble_rva — RVA-aware disassembly
 
 ```python
-result = disassemble_rva("chrome.dll", 0xc43550, count=20)
-result = disassemble_rva("chrome.dll", rva=0xc43550, count=20,
-                         symbols={0x1044f640: "g_config"}, resolve_rip=True)
+result = disassemble_rva("chrome.dll", 0x1c43550, count=20)
+result = disassemble_rva("chrome.dll", rva=0x1c43550, count=20,
+                         symbols={0x2f10a40: "g_config"}, resolve_rip=True)
 ```
 
 <!-- return-keys: disassemble_rva = image_base, start_rva, lines -->
@@ -349,8 +392,8 @@ and an empty `lines` list.
 The parameters are `rva` and `count` — not `start_rva` / `num_instructions`.
 
 ```bash
-fp binary disasm-rva chrome.dll --rva 0xc43550 --count 20
-fp binary disasm-rva chrome.dll -r 0xc43550 -n 60 --symbols 0x1044f640:g_config
+fp binary disasm-rva chrome.dll --rva 0x1c43550 --count 20
+fp binary disasm-rva chrome.dll -r 0x1c43550 -n 60 --symbols 0x2f10a40:g_config
 ```
 
 ### field_refs — struct field access
@@ -358,8 +401,8 @@ fp binary disasm-rva chrome.dll -r 0xc43550 -n 60 --symbols 0x1044f640:g_config
 Answers "who touches `this->field_` at +0xB0?".
 
 ```python
-refs = field_refs("chrome.dll", 0xB0, scan_start_rva=0xc42a90,
-                  scan_end_rva=0xc43f95, kind="both")
+refs = field_refs("chrome.dll", 0xB0, scan_start_rva=0x1c42000,
+                  scan_end_rva=0x1c43f00, kind="both")
 refs = field_refs("chrome.dll", 0x78)      # range defaults to .text
 ```
 
@@ -368,7 +411,7 @@ Rows: `from_rva`, `mnemonic`, `op_str`, `kind` (`read`/`write`), `size`. Matches
 the SSE stores MSVC emits for adjacent members.
 
 ```bash
-fp binary field-refs chrome.dll --offset 0xB0 --start-rva 0xc42a90 --end-rva 0xc43f95
+fp binary field-refs chrome.dll --offset 0xB0 --start-rva 0x1c42000 --end-rva 0x1c43f00
 fp binary field-refs chrome.dll --offset 0x78 --kind write --with-func
 ```
 
@@ -379,7 +422,7 @@ Note the option names: `--offset`, `--start-rva`, `--end-rva` (not `--start` / `
 ```python
 result = map_refs_to_functions(
     "chrome.dll",
-    targets={"enableCanvasNoise": 0xfcae886, "webglRenderer": 0xfcba225},
+    targets={"enableTelemetry": 0x2f10a40, "deviceModelName": 0x2f11800},
     kinds=("rip",),
 )
 ```
@@ -399,7 +442,7 @@ The CLI variant resolves the strings for you — `--strings` for an explicit lis
 auto-collect every NUL-terminated `.rdata` string with that prefix:
 
 ```bash
-fp binary map-refs chrome.dll --strings "enableCanvasNoise,webglRenderer"
+fp binary map-refs chrome.dll --strings "enableTelemetry,deviceModelName"
 fp binary map-refs chrome.dll --prefix np- --min-labels 2
 ```
 
@@ -416,7 +459,7 @@ img.off_to_rva(0x400)      # -> RVA, or None outside every raw section
 img.va_to_rva(0x180c43550)
 img.rva_to_va(0xc43550)
 img.read_rva(0xc43550, 64) # clamped to the containing section
-img.in_file(0x1044f640)    # False for uninitialised .data
+img.in_file(0x2f10a40)     # False for uninitialised .data
 img.section_of(0xc43550)   # ".text"
 img.exception_table()      # [(begin_rva, end_rva, unwind_rva), ...] - cached, sorted
 img.function_at(0xc43500)  # -> (begin_rva, end_rva, unwind_rva) | None, binary search
@@ -440,7 +483,7 @@ seconds. Two ways to not pay it repeatedly:
 
 ```bash
 fp binary index-build chrome.dll
-fp binary xrefs-rva chrome.dll --target 0xfae6439 --kinds rip   # now a DB query
+fp binary xrefs-rva chrome.dll --target 0x2f10a40 --kinds rip   # now a DB query
 fp binary index-info chrome.dll
 fp binary index-drop chrome.dll
 ```
@@ -533,6 +576,17 @@ analysis found the function; dynamic analysis reads its arguments.
   finds nothing regardless of how heavily used they are. `function_xrefs` sweeps code *and* data
   and says which case it is. *(enforced:
   `tests/test_pe_rva.py::test_call_jmp_scan_cannot_see_an_indirect_only_callee`)*
+- **A struct/vtable offset is not an identity.** `[reg+0x1f8]` matched 200+ unrelated classes in
+  one Chromium DLL. The dispatch site does not know the object's type, so this cannot be filtered
+  — go `vtable_of_function` from the implementation, or decide it at runtime. `field_refs` warns
+  above 100 hits. *(enforced: `tests/test_pe_rva.py::test_field_refs_warns_when_the_offset_cannot_discriminate`)*
+- **On a `.pdata`-less leaf, runtime caller attribution fails too.** `Backtracer.ACCURATE` walks
+  unwind info, so it returns an empty or single-frame stack; and `Interceptor`'s trampoline makes
+  `this.returnAddress` report the hooked function's own address rather than the caller — measured
+  on a 2-instruction getter, which reported itself. Check `func-bounds` before planning to
+  identify callers at runtime; when it returns `None`, compare behaviour across inputs (vary one
+  setting, count invocations of a downstream function) instead. The generated native hook now
+  falls back to `Backtracer.FUZZY` and labels which backtracer produced the frames.
 - **`rip` finding nothing is not proof of absence.** Try `ptr` on `.rdata`, widen the range, and
   check `find_inline_strings` — a string built from immediates has no address to reference, so
   every xref scan and every contiguous byte search misses it by construction. Only a string of

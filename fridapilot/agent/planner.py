@@ -221,7 +221,17 @@ When target is an iOS/macOS app, follow this specialized pipeline:
   no direct branch anywhere in the image - their address exists only as an 8-byte pointer in a
   data section - so "who calls it" returns 0 whether the function is hot or dead. follow=True
   adds one scan that finds the instructions loading those slots, i.e. the real dispatch sites
+- pe_rva.vtable_of_function(path, func_rva) -> Which vtable(s) hold this virtual method, at
+  which slot index, plus the MSVC RTTI class name when the build kept RTTI, and the
+  constructors that install the table (the route to the class when RTTI is stripped, as in
+  Chromium). This is the DECIDABLE direction. The reverse is not: a slot offset taken from a
+  dispatch site (e.g. field_refs on a slot offset) cannot be narrowed to one class, because the
+  object's
+  dynamic type is not in the instruction stream - measured 200+ matches from unrelated classes.
+  Never plan "search [reg+off] to find which class dispatches slot N"; anchor on the
+  implementation, or settle it at runtime by behavioural comparison
 - pe_rva.field_refs(path, offset, kind, start, end) -> Find struct field read/write at a given offset (e.g., offset=0xB0)
+  Warns when the match count is too high to identify a field - a shared offset is noise, not an answer
 - pe_rva.map_refs_to_functions(path, strings, start, end) -> Map multiple strings to their consuming functions in one pass
 - rip_index.build_rip_index(path, section) -> Scan the section ONCE and persist every rip
   reference into data sections. Afterwards xrefs_to_rva answers rip queries from the index
@@ -285,9 +295,8 @@ step 2 directly.
 
 Step 2 — Cross-references. FIRST decide what the target is. If it is a FUNCTION, use
 function_xrefs, not xrefs_to_rva(kinds=("call","jmp")): a callee reached only through a
-vtable / IDL binding table / import thunk has no direct branch anywhere, so "who calls it"
-returns 0 for a hot function exactly as it does for dead code (real case: a Blink IDL method
-at 0x0B029CC0 — the V8 bindings dispatch it from a generated table, .text contains no call).
+vtable / script-binding table / import thunk has no direct branch anywhere, so "who calls it"
+returns 0 for a hot function exactly as it does for dead code.
 For DATA, xrefs_to_rva defaults to the whole section — NEVER hand-pick a sub-range unless
 deliberate. A partial scan returning nothing is indistinguishable from "no references" (real
 bug: 240 MB .text, 21.8% scanned, reported 0 refs; another run scanned 16.3% of the range).
@@ -311,6 +320,15 @@ then disassemble_rva with correct ImageBase, then field_refs for struct offsets.
 
 Step 4 — Switch to Frida. When values only exist at runtime (keys, protocol data, dynamic
 addresses), use attach/spawn + inject. Static analysis found the function; dynamic reads args.
+Two runtime caveats that come from the same root cause as the .pdata gap above: a leaf
+function with no RUNTIME_FUNCTION entry has no unwind info, so Backtracer.ACCURATE returns an
+empty or single-frame stack, and Interceptor's trampoline makes this.returnAddress report the
+hooked function's own address instead of the caller (measured on a 2-instruction getter). Run
+function_bounds on a hook target first; if it returns None, do NOT plan to identify callers
+from the runtime stack. Use behavioural comparison instead - vary one input across runs and
+count invocations of a downstream function. That is what settled a feature gate in a
+Chromium-based browser after both the static offset search and the returnAddress approach
+failed.
 
 
 

@@ -121,6 +121,7 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp binary index-drop <file>` | 删除该文件内容对应的索引 | ❌ |
 | `fp binary xrefs-rva <file>` | RVA-aware 交叉引用（rip 数据引用 + CALL/JMP）。范围默认整节（`--section`），并打印实际扫描覆盖率 | ❌ |
 | `fp binary callers <file> --target <rva>` | **函数的调用方**：所有可执行节扫 call/jmp + 所有数据节扫指针槽位，给出结论句（虚函数/IDL 绑定表/thunk 没有直接 call，用这个而不是 `xrefs-rva --kinds call,jmp`） | ❌ |
+| `fp binary vtable <file> --target <rva>` | 虚函数**实现地址** → 它在哪个 vtable、第几槽、MSVC RTTI 类名、安装该表的构造函数（反方向「按槽位偏移找类」静态不可解） | ❌ |
 
 
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
@@ -278,8 +279,8 @@ fp binary search-bytes target.dll "48 8b ?? 48 89"
 目标是**函数** → 用 `fp binary callers`，不要用 `xrefs-rva --kinds call,jmp`：
 
 ```bash
-fp binary callers target.dll --target 0x0B029CC0
-fp binary callers target.dll --target 0x0B029CC0 --follow
+fp binary callers target.dll --target 0x1c43500
+fp binary callers target.dll --target 0x1c43500 --follow
 ```
 
 C++ 虚函数、Blink IDL 方法（如 `HTMLCanvasElement::toDataURL`，由 V8 绑定层从生成的方法表里调）、导入 thunk、回调——这些被调用者在整个镜像里**没有任何直接 call/jmp 指令**，它们的地址只以一个 8 字节指针的形式存在于数据节。所以「谁 call 这个函数」对它们必然返回 0，热函数和死代码的输出完全一样。
@@ -309,16 +310,16 @@ fp binary map-refs target.dll --strings "key_a,key_b,key_c"
 **Step 2b — 内联构造字符串（其他工具的结构性盲区）**
 
 ```bash
-fp binary inline-strings target.dll --text AudioBuffer
-fp binary inline-strings target.dll --text AudioBuffer --confirmed
+fp binary inline-strings target.dll --text ConfigValue
+fp binary inline-strings target.dll --text ConfigValue --confirmed
 fp binary inline-strings target.dll --text 许可过期 --encoding gbk
 ```
 
-编译器把字符串按 8 字节一组塞进立即数，字符被操作码隔开。`AudioBuffer`（11 字节）实际是：
+编译器把字符串按 8 字节一组塞进立即数，字符被操作码隔开。`ConfigValue`（11 字节）实际是：
 
 ```
-48 B8 41 75 64 69 6F 42 75 66    movabs rax, imm64  -> "AudioBuf"
-B8 66 65 72 00                   mov eax, imm32     -> "fer\0"
+48 B8 43 6F 6E 66 69 67 56 61    movabs rax, imm64  -> "ConfigVa"
+B8 6C 75 65 00                   mov eax, imm32     -> "lue\0"
 ```
 
 完整 11 字节在整个文件里**不连续出现**，所以 `find-string-rva` / `find-text` / `search-bytes` 全部返回空；`xrefs-rva` 更没有目标 RVA 可查。只有恰好 8 字节的串能被普通搜索命中——这就是这个盲区长期没暴露的原因。该命令用前 8 字节做锚点，再确认后续分组。
@@ -352,6 +353,14 @@ fp binary field-refs target.dll --offset 0xB0
 - `disasm-rva` ImageBase 正确、rip/call 目标自动标注
 - `field-refs` 定位结构体字段读写（如 `this->field_ at +0xB0`）
 
+**偏移不是身份。** `field-refs` 命中上百条时会警告：偏移被无关类共享，这是噪声不是答案（实测某 vtable 槽位偏移在一个 Chromium DLL 里 200+ 处命中）。派发点不知道对象的动态类型，所以过滤不可能把它收窄——这不是工具能修的。走可解的方向：
+
+```bash
+fp binary vtable target.dll --target 0x1c43500
+```
+
+从**实现地址**反查它在哪个 vtable、第几槽、MSVC RTTI 类名、以及安装该表的构造函数（Chromium 用 `-fno-rtti`，RTTI 为空是正常的，此时构造函数引用是找回类名的唯一路径）。
+
 **Step 4 — 转入动态分析（运行时才有的值）**
 
 当静态分析已定位关键函数但需要运行时数据（加密密钥、协议内容、动态解析的地址）时，切换到 Frida：
@@ -361,6 +370,13 @@ fp attach 1234
 fp inject --target YourApp.exe --script hook.js
 fp crypto hook-bcrypt --target YourApp.exe
 ```
+
+**无 `.pdata` 的叶函数，运行期也拿不到调用方。** 两个都实测过：
+
+- `Backtracer.ACCURATE` 走 unwind 信息，对没有 RUNTIME_FUNCTION 条目的叶函数返回空栈或只有一帧
+- `this.returnAddress` 因为 Interceptor 的 trampoline，报出的是被 hook 函数自己的地址而不是调用方（实测一个两条指令的 getter，报的就是它自己）
+
+所以 hook 之前先跑 `fp binary func-bounds`；返回 None 就不要指望从运行期栈上认调用方。改用**行为对照**：只改一个输入，数下游函数的调用次数差。生成的 native hook 现在会在 ACCURATE 拿不到栈时回退 `Backtracer.FUZZY`，并在消息里标 `backtracer: accurate | fuzzy`，避免把降级结果当准确结果用。
 
 ### Crypto Reverse — 二进制加密逆向分析
 
@@ -575,6 +591,7 @@ binary_inline_strings     # 定位 movabs 内联构造的字符串（连续搜�
 
 binary_xrefs_rva          # RVA 交叉引用（rip 数据引用 + call/jmp，支持 pdata_only）
 binary_callers            # 函数调用方：code 节 call/jmp + data 节指针槽位，附结论句
+binary_vtable             # 虚函数实现 → vtable/槽号/RTTI 类名/安装该表的构造函数
 binary_func_bounds        # 从 .pdata 取函数边界
 binary_disasm_rva         # RVA-aware 反汇编（rip/call 目标标注）
 binary_field_refs         # 结构体字段 [reg+offset] 读写定位
