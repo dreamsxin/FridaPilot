@@ -277,7 +277,8 @@ def pe_path(tmp_path_factory) -> str:
 
 
 def _actual_keys(name: str, path: str) -> set[str]:
-    from fridapilot.tools import binary_analysis, pe_metadata, pe_rva
+    from fridapilot.tools import binary_analysis, pe_metadata, pe_rva, rip_index
+
 
     end = TEXT_RVA + TEXT_VSIZE
     calls = {
@@ -290,6 +291,9 @@ def _actual_keys(name: str, path: str) -> set[str]:
         "map_refs_to_functions": lambda: pe_rva.map_refs_to_functions(
             path, {"g": TARGET_RVA}, TEXT_RVA, end),
         "section_range": lambda: pe_rva.section_range(path, ".text"),
+        "build_rip_index": lambda: rip_index.build_rip_index(
+            path, db_path=str(Path(path).with_suffix(".ripindex.db"))),
+
 
         "find_text": lambda: binary_analysis.find_text(
             path, MARKER_TEXT, encodings=("ascii",))[0].model_dump(),

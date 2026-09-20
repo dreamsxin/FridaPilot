@@ -348,12 +348,40 @@ a full `.text` rip scan takes ≈4 s per target, and `map_refs_to_functions` cos
 for *all* targets together.
 
 Cost scales with the scanned byte range, so a full sweep of a ~100 MB `.text` is minutes, not
-seconds. Practical order of work:
+seconds. Two ways to not pay it repeatedly:
 
-1. `find-string-rva` (fast, whole-file `bytes.find`)
-2. `xrefs-rva` scoped to a few hundred KB when you can guess the region
-3. `func-bounds` to pin the function, then `disasm-rva` / `field-refs` inside it
-4. `map-refs` when you have N targets — never loop `xrefs-rva` N times over the same range
+**Index the binary once** when the investigation will ask more than a couple of questions:
+
+```bash
+fp binary index-build chrome.dll
+fp binary xrefs-rva chrome.dll --target 0xfae6439 --kinds rip   # now a DB query
+fp binary index-info chrome.dll
+fp binary index-drop chrome.dll
+```
+
+```python
+from fridapilot.tools.rip_index import build_rip_index, index_info
+
+stats = build_rip_index("chrome.dll", section=".text")
+info = index_info("chrome.dll")
+```
+
+<!-- return-keys: build_rip_index = sha256, refs, targets, section, scan_start_rva, scan_end_rva, target_ranges, seconds, db_path -->
+`build_rip_index` decodes every `.pdata` function once and stores each rip reference whose target
+lands in a data section. Measured on ntdll: 3.9 s to build (8389 refs to 2400 targets), after
+which the same query that took 4.2 s returns immediately with identical results. It is keyed by
+file **content hash**, so a patched binary has no index rather than a stale one, and it records
+the range and target sections it covers — a query outside them falls back to a real scan instead
+of returning a short list. `--no-index` forces a rescan; `kinds` other than `rip` still scan.
+
+Practical order of work:
+
+1. `metadata` (free) and `find-string-rva` (fast, whole-file `bytes.find`)
+2. `index-build` once, if more than a couple of xref questions are coming
+3. `xrefs-rva` (whole section by default — check the printed coverage)
+4. `func-bounds` to pin the function, then `disasm-rva` / `field-refs` inside it
+5. `map-refs` when you have N targets and no index — never loop `xrefs-rva` N times
+
 
 ## Gotchas
 

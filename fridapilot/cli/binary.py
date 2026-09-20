@@ -796,6 +796,11 @@ def xrefs_rva_cmd(
         help="Only scan code covered by .pdata RUNTIME_FUNCTIONs. Fewer false "
              "positives when the range spans data, but misses leaf functions.",
     ),
+    no_index: bool = typer.Option(
+        False, "--no-index",
+        help="Ignore the prebuilt rip index (see `index-build`) and rescan.",
+    ),
+
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
     """RVA-aware xref scan: rip-relative data refs + direct call/jmp to a target RVA.
@@ -828,7 +833,9 @@ def xrefs_rva_cmd(
                            kinds=kind_tuple, verify=not no_verify,
                            scan_gaps=not pdata_only,
                            section="" if (start_rva is not None and end_rva is not None)
-                                   else section)
+                                   else section,
+                           use_index=not no_index)
+
 
     if json_output:
         _emit_json(results)
@@ -933,7 +940,123 @@ def analyze_macho_cmd(
         console.print("  frida-ios-dump -H <device_ip> -p 22 \"App Name\"")
 
 
+@binary_app.command("index-build")
+def index_build_cmd(
+    binary: str = typer.Argument(..., help="Path to a PE file."),
+    section: str = typer.Option(".text", "--section", "-s", help="Code section to scan."),
+    targets_in: str = typer.Option(
+        "", "--targets-in",
+        help="Comma list of data sections whose targets to record (default: all "
+             "non-executable sections).",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Scan once, then answer xref queries from an index instead of rescanning.
+
+    xrefs-rva costs the same whether you ask about one target or twenty, so a
+    multi-day investigation re-decodes the same .text over and over. This decodes
+    every .pdata function once and stores each rip reference whose target lands in a
+    data section; afterwards `xrefs-rva --kinds rip` is a database query.
+
+    The index records the range, section and target sections it covers, and refuses
+    queries outside them, so it can never answer with a short list that looks
+    complete. Rebuild after patching the binary - the index is keyed by file hash,
+    so a modified file simply has no index rather than a stale one.
+    """
+    from fridapilot.tools.rip_index import build_rip_index
+
+    if not Path(binary).is_file():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+    sections = [s.strip() for s in targets_in.split(",") if s.strip()] or None
+    err_console.print(f"[dim]Scanning {section} of {Path(binary).name}…[/dim]")
+    stats = build_rip_index(binary, section=section, target_sections=sections)
+
+    if json_output:
+        _emit_json(stats)
+        return
+
+    console.print(f"[green]Indexed[/green] {stats['refs']} rip references to "
+                  f"{stats['targets']} distinct targets in {stats['seconds']}s")
+    console.print(f"  scanned {section} 0x{stats['scan_start_rva']:x}-"
+                  f"0x{stats['scan_end_rva']:x}")
+    console.print("  target sections: " + ", ".join(
+        f"{name} (0x{lo:x}-0x{hi:x})" for lo, hi, name in stats["target_ranges"]))
+    console.print(f"  [dim]{stats['db_path']}[/dim]")
+
+
+@binary_app.command("index-info")
+def index_info_cmd(
+    binary: str = typer.Argument("", help="Path to a PE file (omit to list all indexes)."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Show the stored rip index for a file, or list every index."""
+    from fridapilot.tools.rip_index import index_info, list_indexes
+
+    if not binary:
+        entries = list_indexes()
+        if json_output:
+            _emit_json(entries)
+            return
+        if not entries:
+            console.print("No indexes built yet. Run: fp binary index-build <file>")
+            return
+        table = Table(title="Rip indexes")
+        table.add_column("File", overflow="fold")
+        table.add_column("Section")
+        table.add_column("Refs", justify="right")
+        table.add_column("Build s", justify="right")
+        table.add_column("Built at")
+        for e in entries:
+            table.add_row(e["filepath"], e["section"], str(e["ref_count"]),
+                          f"{e['build_seconds']:.1f}", e["built_at"])
+        console.print(table)
+        return
+
+    if not Path(binary).is_file():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+    info = index_info(binary)
+    if info is None:
+        console.print("[yellow]No index for this file content.[/yellow] "
+                      "Build one: fp binary index-build <file>")
+        raise typer.Exit(1)
+
+    if json_output:
+        _emit_json(info)
+        return
+
+    console.print(Panel(
+        f"{info['filepath']}\n"
+        f"sha256: {info['sha256'][:32]}…\n"
+        f"section: {info['section']}  0x{info['scan_start_rva']:x}-0x{info['scan_end_rva']:x}\n"
+        f"refs: {info['ref_count']}   built: {info['built_at']} "
+        f"({info['build_seconds']:.1f}s)\n"
+        f"targets: " + ", ".join(f"{n}" for _lo, _hi, n in info["target_ranges"]),
+        title="Rip index",
+    ))
+
+
+@binary_app.command("index-drop")
+def index_drop_cmd(
+    binary: str = typer.Argument(..., help="Path to a PE file."),
+) -> None:
+    """Delete the stored rip index for this file content."""
+    from fridapilot.tools.rip_index import drop_index
+
+    if not Path(binary).is_file():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+    if drop_index(binary):
+        console.print("[green]Index dropped.[/green]")
+    else:
+        console.print("[yellow]No index for this file content.[/yellow]")
+
+
 @binary_app.command("metadata")
+
 def metadata_cmd(
     binary: str = typer.Argument(..., help="Path to a PE file (.exe / .dll)."),
     limit: int = typer.Option(15, "--limit", "-l", help="Max rows per list."),

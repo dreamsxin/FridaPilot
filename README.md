@@ -117,7 +117,11 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp binary xrefs --address <addr>` | 交叉引用查找（CALL/JMP） | ❌ |
 | `fp binary analyze-go <file>` | Go 二进制分析（版本/包/函数/源码路径） | ❌ |
 | `fp binary find-string-rva <file>` | 定位字符串并返回 RVA（区分文件偏移/RVA） | ❌ |
+| `fp binary index-build <file>` | 扫一遍建 rip 引用索引，之后 `xrefs-rva --kinds rip` 变成数据库查询（ntdll 实测 3.9s 建索引，查询 4.2s→~0s） | ❌ |
+| `fp binary index-info [file]` | 查看索引覆盖范围 / 列出全部索引 | ❌ |
+| `fp binary index-drop <file>` | 删除该文件内容对应的索引 | ❌ |
 | `fp binary xrefs-rva <file>` | RVA-aware 交叉引用（rip 数据引用 + CALL/JMP）。范围默认整节（`--section`），并打印实际扫描覆盖率 | ❌ |
+
 
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
 | `fp apk analyze <apk>` | APK 静态分析（manifest/权限/组件/native 库/签名/保护特征） | ❌ |
@@ -442,7 +446,10 @@ binary_xrefs              # 交叉引用查找（文件偏移）
 binary_analyze_go         # Go 二进制分析
 
 # ── RVA-aware PE 分析（ImageBase 正确，适用于超大 DLL）──
+binary_index_build        # 扫一遍建 rip 引用索引，之后 xrefs 查询变成数据库查询
+binary_index_info         # 索引覆盖范围（按文件哈希索引，改过的文件不会命中旧索引）
 binary_section_range      # 节的起止 RVA（扫描范围别手填，先问它）
+
 binary_metadata           # 元数据侦察：PDB GUID/符号服务器 key、版本资源、manifest、工具链、Rust 源码路径
 binary_find_text          # 同一串按多种编码同时搜（ascii/utf8/utf16le/gbk/big5/cp932/...），返回 RVA
 binary_find_string_rva    # 定位字符串并返回 RVA
@@ -595,7 +602,8 @@ fridapilot/
 - **闭环自动化**：生成 → 注入 → 观测 → 修复，不只是单次脚本生成
 - **运行时上下文感知**：先侦察再生成，减少 LLM 幻觉
 - **静态 + 动态一体化**：PE/ELF 静态分析 + Frida 动态 Hook，同一工具链覆盖完整 RE 流程
-- **MCP 标准化**：39 个 MCP 工具，可被 Claude Desktop / Cursor / 任意 Agent 调用
+- **MCP 标准化**：41 个 MCP 工具，可被 Claude Desktop / Cursor / 任意 Agent 调用
+
 
 
 

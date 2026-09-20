@@ -152,8 +152,12 @@ If a signature changes, fix the docs in the same commit — the test will point 
 - **`PEImage` reads the whole file and caches `.pdata`.** Reuse one instance; constructing it per
   lookup re-reads a 250 MB DLL each time.
 - **Scan cost scales with the byte range.** A full `.text` rip scan of ntdll (1.5 MB) takes ≈4 s;
-  a 100 MB `.text` is minutes. Narrow with `func-bounds`, and use `map_refs_to_functions` for N
-  targets instead of N scans.
+  a 100 MB `.text` is minutes. Narrow with `func-bounds`, use `map_refs_to_functions` for N
+  targets instead of N scans, and `rip_index.build_rip_index` when the same binary will be
+  questioned repeatedly — it turns later rip queries into SQL. The index is keyed by file hash
+  and refuses queries outside its recorded coverage, which is the only reason it is safe: a cache
+  that answers beyond what it scanned reproduces the partial-scan false negative.
+
 - **Substring matching on identifiers.** Short indicators must match on token boundaries;
   `"su" in blob` fires on `issue`, `consumer` and `resume`.
 - **String extraction is encoding-blind by default.** The ASCII scanner accepts only 0x20-0x7e,

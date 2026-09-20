@@ -209,6 +209,14 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 
 - pe_rva.field_refs(path, offset, kind, start, end) -> Find struct field read/write at a given offset (e.g., offset=0xB0)
 - pe_rva.map_refs_to_functions(path, strings, start, end) -> Map multiple strings to their consuming functions in one pass
+- rip_index.build_rip_index(path, section) -> Scan the section ONCE and persist every rip
+  reference into data sections. Afterwards xrefs_to_rva answers rip queries from the index
+  instead of rescanning: ntdll .text measured 3.9s to build, then ~0s per query vs 4.2s.
+  Build this first when the plan asks about several targets in a large DLL
+- rip_index.index_info(path) -> What the stored index covers (or null). The index is keyed by
+  file hash and refuses queries outside its recorded range/target sections, so a patched binary
+  or a wider question falls back to a real scan rather than a short answer
+
 - pe_rva.disassemble_rva(path, rva, count) -> RVA-aware disassembly with symbol annotations
 - pe_rva.function_bounds(path, rva) -> Find function start/end boundaries from .pdata
 

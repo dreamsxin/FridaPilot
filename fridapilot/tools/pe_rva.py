@@ -804,7 +804,9 @@ def xrefs_to_rva(
     verify: bool = True,
     scan_gaps: bool = True,
     section: str = "",
+    use_index: bool = True,
 ) -> list[dict[str, Any]]:
+
 
     """RVA-aware cross-reference scan within [scan_start_rva, scan_end_rva).
 
@@ -843,6 +845,11 @@ def xrefs_to_rva(
             hand-written asm, packed code, 32-bit images, data sections). False =
             strict ``.pdata``-only mode: fewer false positives when the range spans
             data, at the cost of missing references outside known functions.
+        use_index: answer the rip part from a prebuilt ``rip_index`` when one covers
+            this file content, range and target section — turning a minutes-long
+            sweep into a query. The index refuses queries outside its recorded
+            coverage, so a miss falls back to scanning rather than under-reporting.
+
 
     Returns list of {from_rva, mnemonic, op_str, target_rva, kind, size}.
     """
@@ -879,10 +886,25 @@ def xrefs_to_rva(
 
     # ── rip-relative ──
     if "rip" in want:
-        for from_rva, _tgt, mnem, op_str, size in _iter_rip_refs(
-                img, md, data, scan_start_rva, scan_end_rva,
-                lambda t: t == target_rva, verify=verify, scan_gaps=scan_gaps):
-            _emit(from_rva, "rip", mnem, op_str, size)
+        cached = None
+        if use_index:
+            from fridapilot.tools.rip_index import lookup_rip_refs
+            cached = lookup_rip_refs(binary_path, target_rva,
+                                     scan_start_rva, scan_end_rva)
+        if cached is not None:
+            # Served from the persistent index, which only answers queries inside
+            # the range and target sections it recorded (see rip_index).
+            for rec in cached:
+                _emit(rec["from_rva"], "rip", rec["mnemonic"], rec["op_str"], rec["size"])
+            if want - {"rip"}:
+                logger.info("rip refs came from the index; the %s scan still runs",
+                            ", ".join(sorted(want - {"rip"})))
+        else:
+            for from_rva, _tgt, mnem, op_str, size in _iter_rip_refs(
+                    img, md, data, scan_start_rva, scan_end_rva,
+                    lambda t: t == target_rva, verify=verify, scan_gaps=scan_gaps):
+                _emit(from_rva, "rip", mnem, op_str, size)
+
 
     # ── absolute encodings: fixed-shape byte scans ──
     for i in range(n - 9):

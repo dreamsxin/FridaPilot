@@ -46,6 +46,8 @@ def _register_tools() -> None:
     from fridapilot.tools import binary_analysis
     from fridapilot.tools import pe_rva
     from fridapilot.tools import pe_metadata as pe_metadata_mod
+    from fridapilot.tools import rip_index as rip_index_mod
+
     from fridapilot.tools import unpacker as unpacker_mod
 
     from fridapilot.tools import apk_analysis
@@ -81,6 +83,10 @@ def _register_tools() -> None:
         "binary_analysis.analyze_go_binary": binary_analysis.analyze_go_binary,
         # Metadata recon - cheapest pass, belongs before any disassembly
         "pe_metadata.pe_metadata": pe_metadata_mod.pe_metadata,
+        # Persistent rip-reference index: scan once, then query
+        "rip_index.build_rip_index": rip_index_mod.build_rip_index,
+        "rip_index.index_info": rip_index_mod.index_info,
+
 
         # PE RVA-aware analysis tools
         "pe_rva.section_range": pe_rva.section_range,
