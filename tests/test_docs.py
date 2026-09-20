@@ -37,7 +37,9 @@ DOCS = [
 ]
 
 FENCE = re.compile(r"^```(\w+)\s*$(.*?)^```\s*$", re.MULTILINE | re.DOTALL)
+INLINE_CODE = re.compile(r"`([^`\n]+)`")
 RETURN_KEYS = re.compile(r"<!--\s*return-keys:\s*([\w.]+)\s*=\s*([^>]+?)\s*-->")
+
 
 
 def _docs() -> list[Path]:
@@ -158,33 +160,53 @@ def _click_root():
     return typer.main.get_command(app)
 
 
-def _cli_lines(text: str) -> list[str]:
-    lines = []
+def _cli_lines(text: str) -> list[tuple[str, str]]:
+    """Runnable `fp ...` examples as (source, line), source in {"bash", "inline"}.
+
+    Inline spans are included because documentation often writes commands as
+    ``CLI: `fp binary ...` `` — still copied verbatim by an agent. A span that is
+    only a command path (`fp dbg`, `fp binary analyze-pe`) is a prose reference,
+    not an invocation, and is skipped during validation.
+    """
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(source: str, raw: str) -> None:
+        line = raw.split("#", 1)[0].split("|", 1)[0].strip()
+        if line.split()[:1] in (["fp"], ["frida-pilot"]) and line not in seen:
+            seen.add(line)
+            found.append((source, line))
+
     for block in _blocks(text, "bash"):
         for raw in block.splitlines():
-            line = raw.strip()
-            if line.startswith("#") or not line:
-                continue
-            line = line.split("#", 1)[0].split("|", 1)[0].strip()
-            if line.split()[:1] in (["fp"], ["frida-pilot"]):
-                lines.append(line)
-    return lines
+            if raw.strip() and not raw.strip().startswith("#"):
+                add("bash", raw.strip())
+
+    for span in INLINE_CODE.findall(text):
+        add("inline", span.strip())
+
+    return found
 
 
-CLI_LINES = [(doc, line) for doc in DOC_FILES for line in _cli_lines(doc.read_text(encoding="utf-8"))]
+
+
+CLI_LINES = [(doc, source, line)
+             for doc in DOC_FILES
+             for source, line in _cli_lines(doc.read_text(encoding="utf-8"))]
 
 
 def test_cli_examples_exist():
     assert CLI_LINES, "documentation shows no `fp` commands - nothing to validate"
 
 
-@pytest.mark.parametrize("doc,line", CLI_LINES,
-                         ids=[f"{d.name}: {ln[:60]}" for d, ln in CLI_LINES])
-def test_cli_example_is_accepted_by_the_app(doc: Path, line: str):
+@pytest.mark.parametrize("doc,source,line", CLI_LINES,
+                         ids=[f"{d.name}: {ln[:60]}" for d, _s, ln in CLI_LINES])
+def test_cli_example_is_accepted_by_the_app(doc: Path, source: str, line: str):
     import click
 
     tokens = shlex.split(line, posix=True)[1:]
     command = _click_root()
+    root = command
     path = []
 
     # descend through command groups
@@ -194,9 +216,15 @@ def test_cli_example_is_accepted_by_the_app(doc: Path, line: str):
         assert sub is not None, f"{doc.name}: unknown command `{' '.join(path + [name])}`"
         command = sub
         path.append(name)
-    assert path, f"{doc.name}: `{line}` names no command"
+    if not path:
+        # `fp --help` / `fp --version`: no subcommand, only root options
+        assert command is root, line
+    if source == "inline" and not tokens:
+        pytest.skip(f"`{line}` is a command reference, not an invocation")
 
-    options = {}
+
+
+    options = {"--help": None, "-h": None}   # click adds these lazily
     arguments = []
     for param in command.params:
         if param.param_type_name == "option":
@@ -211,15 +239,18 @@ def test_cli_example_is_accepted_by_the_app(doc: Path, line: str):
         token = tokens.pop(0)
         if token.startswith("-") and token != "-":
             name, _, inline = token.partition("=")
-            param = options.get(name)
-            assert param is not None, \
+            assert name in options, \
                 f"{doc.name}: `fp {' '.join(path)}` has no option {name}"
+            param = options[name]
+            if param is None:
+                continue                      # --help / -h
             seen.add(param.name)
             if not param.is_flag and not inline:
                 assert tokens, f"{doc.name}: {name} is missing its value"
                 tokens.pop(0)
         else:
             positional += 1
+
 
     missing = [p.opts[0] for p in command.params
                if p.param_type_name == "option" and p.required and p.name not in seen]

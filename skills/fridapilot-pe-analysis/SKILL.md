@@ -248,9 +248,10 @@ seconds. Practical order of work:
 
 ## Gotchas
 
-- **Pass RVAs, not file offsets or VAs.** `fp binary disassemble --address` takes a file offset;
-  every `*-rva` command and every `pe_rva` function takes an RVA. `PEImage.rva_to_off` /
+- **Pass RVAs, not file offsets or VAs.** The `disassemble` command's `--address` is a file
+  offset; every `*-rva` command and every `pe_rva` function takes an RVA. `PEImage.rva_to_off` /
   `off_to_rva` convert, and the delta differs per section.
+
 - **`.pdata` is x64-only.** On a 32-bit image `function_bounds` returns `None`, `exception_table`
   is empty, and `xrefs_to_rva` relies entirely on pass B (`scan_gaps=True`, the default).
 - **`rip` finding nothing is not proof of absence.** Try `ptr` on `.rdata`, and widen the range.

@@ -101,8 +101,10 @@ git worktree remove --force ../_check
 
 - every ```python``` block must parse, and every call to a FridaPilot function must bind against
   the real signature;
-- every `fp …` line in a ```bash``` block must resolve to a registered command with real
-  options, required options present and positional arity respected;
+- every `fp` invocation in a ```bash``` block (and every `fp …` command written inline) must
+  resolve to a registered command with real options, required options present and positional
+  arity respected;
+
 - `<!-- return-keys: <func> = <key>, <key> -->` markers must match the keys the function really
   returns.
 
@@ -122,10 +124,12 @@ If a signature changes, fix the docs in the same commit — the test will point 
 
 ## Gotchas that have caused real bugs
 
-- **RVA vs file offset vs VA.** `fp binary disassemble --address` takes a file offset; every
+- **RVA vs file offset vs VA.** The `disassemble` command's `--address` is a file offset; every
   `*-rva` command and every `pe_rva` function takes an RVA. The delta differs per section, so a
   single constant is wrong the moment you cross a boundary. Convert with `PEImage.rva_to_off` /
   `off_to_rva`.
+
+
 - **`.pdata` is x64-only, and leaf functions may have no entry.** `function_bounds() is None`
   means "no RUNTIME_FUNCTION", not "not a function". Do not use it as a filter that silently
   drops results; `xrefs_to_rva` keeps a separate scan for exactly that reason.
