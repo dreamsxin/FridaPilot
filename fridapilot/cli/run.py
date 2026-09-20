@@ -94,7 +94,7 @@ async def _run_agent(
                 console.print(f"    Error: {r.error}")
 
         # Phase 3: Reflect
-        console.print(f"\n[bold cyan]Phase 3: Reflecting...[/bold cyan]")
+        console.print("\n[bold cyan]Phase 3: Reflecting...[/bold cyan]")
         diag = await reflect_and_fix(plan, results, ctx, max_retries=max_retries)
 
         if diag.success:
@@ -115,7 +115,7 @@ async def _run_agent(
         console.print(f"[red]Max retries ({max_retries}) reached.[/red]")
 
     # Phase 4: Report
-    console.print(f"\n[bold cyan]Phase 4: Generating report...[/bold cyan]")
+    console.print("\n[bold cyan]Phase 4: Generating report...[/bold cyan]")
     report = generate_report(plan, results, ctx, format=report_format)
 
     if output:
@@ -201,9 +201,10 @@ async def _run_analysis(
         elif mode == "validation":
             xrefs = step_results.get("binary_analysis.xrefs_to", "N/A")
             prompt = get_prompt(template_name,
-                binary_info=binary_info, validation_functions="See disassembly",
+                binary_info=binary_info, validation_functions=xrefs,
                 disassembly=disasm_str, exit_codes="See strings",
                 strings=strings_str)
+
         else:
             console.print(f"[red]Unknown analysis mode: {mode}[/red]")
             return
