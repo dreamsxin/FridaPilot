@@ -472,14 +472,20 @@ it per lookup.
 
 ## Performance
 
-Measured with the current implementation on ntdll.dll (1.5 MB `.text`, 5650 `.pdata` entries):
-a full `.text` rip scan takes ≈4 s per target, and `map_refs_to_functions` costs the same ≈4 s
-for *all* targets together.
+A single-target rip query is dominated by the candidate scan, not by disassembly: a rip operand
+is always ModRM mod=00/rm=101 + disp32, so the displacements that could resolve to the target are
+found at C speed first and only the `.pdata` functions containing one get decoded. Measured on a
+251 MB `.text` (Chromium-sized DLL), full 100% coverage: **≈5.6 s** for one target, down from
+≈11 minutes when every function was decoded (linear capstone decode costs ≈2.7 s/MB). ntdll
+(1.5 MB `.text`, 5650 `.pdata` entries): well under a second per target, and
+`map_refs_to_functions` costs about one scan for *all* targets together.
 
-Cost scales with the scanned byte range, so a full sweep of a ~100 MB `.text` is minutes, not
-seconds. Two ways to not pay it repeatedly:
+So a full-section scan is normally the right call — do not pre-narrow the range to save time and
+risk the partial-coverage false negative. Two things still cost real time:
 
-**Index the binary once** when the investigation will ask more than a couple of questions:
+**`index-build` pays the full decode.** It records refs to *every* data address, so the prefilter
+keeps nearly all candidates and the build is the ≈11-minute job the single-target path avoids. It
+is worth it when dozens of queries follow, not as a shortcut for the first one:
 
 ```bash
 fp binary index-build chrome.dll

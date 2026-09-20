@@ -549,4 +549,97 @@ def test_field_refs_warns_when_the_offset_cannot_discriminate(fixture_pe, caplog
     assert "vtable_of_function" in caplog.text
 
 
+# ── the displacement prefilter: it must save work without losing references ──
+
+def test_a_function_without_a_candidate_displacement_is_never_decoded(fixture_pe):
+    """Decoding is driven by the prefilter, not by the function list.
+
+    A rip operand is always ModRM mod=00/rm=101 + disp32, so a function holding no
+    displacement that resolves to the target cannot reference it. Decoding every
+    function regardless is what made one full ``.text`` query on a 251 MB image take
+    ≈11 minutes (measured: 2.7 s/MB of linear capstone decode) and read as a hang.
+    """
+    import capstone
+
+    from fridapilot.tools.pe_rva import _iter_rip_refs
+
+    path, _placed, _end = fixture_pe
+    img = PEImage(path)
+    lo, hi = img.section_range(".text")
+    data = img.read_rva(lo, hi - lo)
+
+    class CountingCs:
+        """Passes disassembly through and records how often it was asked for."""
+
+        def __init__(self, inner):
+            self.inner, self.calls = inner, 0
+
+        def disasm(self, *args, **kwargs):
+            self.calls += 1
+            return self.inner.disasm(*args, **kwargs)
+
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    md.detail = True
+
+    unused = RDATA_RVA + 0x300
+    assert xrefs_to_rva(path, unused, kinds=("rip",), use_index=False, diagnose=False) == []
+    absent = CountingCs(md)
+    assert list(_iter_rip_refs(img, absent, data, lo, hi, lambda t: t == unused)) == []
+    assert absent.calls == 0
+
+    present = CountingCs(md)
+    found = list(_iter_rip_refs(img, present, data, lo, hi, lambda t: t == TARGET_RVA))
+    assert found, "the target that IS referenced must still be found"
+    assert present.calls, "and the function referencing it must still be decoded"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs a real x64 PE from Windows")
+def test_ntdll_targets_referenced_exactly_once_survive_the_prefilter():
+    """Recall for single-reference targets — what a prefilter breaks first.
+
+    The busiest targets are reached through many encodings, so they stay findable even
+    if one form is missed. A global touched once does not, which is why ground truth
+    here is filtered down to exactly those.
+    """
+    import capstone
+    from collections import defaultdict
+    from pathlib import Path
+
+    from capstone import x86 as cx86
+
+    if not Path(NTDLL).is_file():
+        pytest.skip("ntdll.dll not available")
+
+    img = PEImage(NTDLL)
+    start, end = img.section_range(".text")
+
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    md.detail = True
+    truth: dict[int, set[int]] = defaultdict(set)
+    for begin, fend, _unwind in img.exception_table()[:1200]:
+        blob = img.read_rva(begin, fend - begin)
+        if not blob:
+            continue
+        pos = begin
+        while pos < fend:
+            moved = False
+            for insn in md.disasm(blob[pos - begin:], img.image_base + pos):
+                moved = True
+                pos = insn.address - img.image_base + insn.size
+                for op in insn.operands:
+                    if op.type == cx86.X86_OP_MEM and op.mem.base == cx86.X86_REG_RIP:
+                        tgt = insn.address + insn.size + op.mem.disp - img.image_base
+                        truth[tgt].add(insn.address - img.image_base)
+                        break
+            if not moved:
+                pos += 1
+
+    lonely = sorted(t for t in truth if len(truth[t]) == 1)
+    assert len(lonely) > 20, "ground truth has too few single-reference targets to judge"
+    for target in lonely[::len(lonely) // 12]:
+        got = {r["from_rva"] for r in xrefs_to_rva(NTDLL, target, start, end,
+                                                  kinds=("rip",), use_index=False)}
+        assert truth[target] <= got, "lost 0x%x: %s" % (target, sorted(truth[target] - got))
+
+
 

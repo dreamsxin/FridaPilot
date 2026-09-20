@@ -151,12 +151,24 @@ If a signature changes, fix the docs in the same commit — the test will point 
   file-aligned, so walking it reads alignment padding as data.
 - **`PEImage` reads the whole file and caches `.pdata`.** Reuse one instance; constructing it per
   lookup re-reads a 250 MB DLL each time.
-- **Scan cost scales with the byte range.** A full `.text` rip scan of ntdll (1.5 MB) takes ≈4 s;
-  a 100 MB `.text` is minutes. Narrow with `func-bounds`, use `map_refs_to_functions` for N
-  targets instead of N scans, and `rip_index.build_rip_index` when the same binary will be
+- **Decode only what a displacement points into.** Linear capstone decode with `detail=True`
+  costs ≈2.7 s/MB, so decoding every `.pdata` function made one full-`.text` rip query on a
+  251 MB Chromium DLL take ≈11 minutes — long enough that the caller reads it as a hang and
+  kills it, which is exactly what happened in real use. A rip operand is always ModRM
+  mod=00/rm=101 + disp32, so `_iter_rip_refs` first locates candidate displacements with a
+  compiled byte-class regex (C speed, ~2% of bytes survive) and skips every function that holds
+  none: the same query now takes ≈5.6 s over the same 100% coverage. Anything added to this
+  module that walks bytes in Python is suspect for the same reason. *(enforced:
+  `tests/test_pe_rva.py::test_a_function_without_a_candidate_displacement_is_never_decoded`,
+  `::test_ntdll_targets_referenced_exactly_once_survive_the_prefilter`)*
+- **Scan cost scales with the byte range.** A full `.text` rip scan of ntdll (1.5 MB) takes ≈4 s
+  when every function must be decoded. Narrow with `func-bounds`, use `map_refs_to_functions`
+  for N targets instead of N scans, and `rip_index.build_rip_index` when the same binary will be
   questioned repeatedly — it turns later rip queries into SQL. The index is keyed by file hash
   and refuses queries outside its recorded coverage, which is the only reason it is safe: a cache
-  that answers beyond what it scanned reproduces the partial-scan false negative.
+  that answers beyond what it scanned reproduces the partial-scan false negative. It is **not** a
+  shortcut for the first question: it records refs to every data address, so the prefilter keeps
+  almost everything and the build pays the full decode that a single-target query now avoids.
 
 - **A struct or vtable offset is not an identity.** `field_refs` on a vtable slot offset matched
   200+ unrelated classes in one Chromium DLL. A dispatch site carries no type information — the

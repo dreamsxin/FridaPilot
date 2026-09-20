@@ -235,8 +235,9 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 - pe_rva.map_refs_to_functions(path, strings, start, end) -> Map multiple strings to their consuming functions in one pass
 - rip_index.build_rip_index(path, section) -> Scan the section ONCE and persist every rip
   reference into data sections. Afterwards xrefs_to_rva answers rip queries from the index
-  instead of rescanning: ntdll .text measured 3.9s to build, then ~0s per query vs 4.2s.
-  Build this first when the plan asks about several targets in a large DLL
+  instead of rescanning: ntdll .text measured 3.9s to build, then ~0s per query. The build pays
+  a full decode because it wants every data target, so it is worth it only when many questions
+  follow - one target is faster without it
 - rip_index.index_info(path) -> What the stored index covers (or null). The index is keyed by
   file hash and refuses queries outside its recorded range/target sections, so a patched binary
   or a wider question falls back to a real scan rather than a short answer
@@ -310,10 +311,12 @@ byte search cannot find it (the characters are separated by the opcodes carrying
 xrefs_to_rva has no target RVA to look for. This is a structural blind spot in every other
 locator, not a tuning issue — do not conclude "unused" without checking it.
 
-Step 2.5 — rip index (optional, amortises cost). When more than a couple of xref questions
-are planned for the same binary, call build_rip_index once. It stores every rip reference;
-subsequent rip queries become instant DB lookups (~0s vs 4s on ntdll). The index is content-
-hash keyed and range-bounded, so it never returns stale or incomplete data.
+Step 2.5 — rip index (optional, amortises cost). One rip query is already cheap: candidate
+displacements are found in C and only the .pdata functions holding one get disassembled, so a
+full 251 MB .text sweep measured 5.6s at 100% coverage. build_rip_index records refs to EVERY
+data address, so it keeps nearly every candidate and pays the full decode (~11 minutes on that
+image) - build it when dozens of questions follow, not to answer the first one. The index is
+content-hash keyed and range-bounded, so it never returns stale or incomplete data.
 
 Step 3 — Converge. function_bounds from .pdata (None = leaf or 32-bit, not "not a function"),
 then disassemble_rva with correct ImageBase, then field_refs for struct offsets.

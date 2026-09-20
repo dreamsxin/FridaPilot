@@ -18,10 +18,16 @@ No LLM dependency. Requires: pefile, capstone.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ModRM byte of a rip-relative operand: mod=00, rm=101, reg free -> 8 values.
+# A rip reference cannot be encoded any other way, which is what makes the
+# prefilter in _iter_rip_refs sound rather than heuristic.
+_RIP_MODRM = re.compile(rb"[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]")
 
 
 class PEImage:
@@ -551,10 +557,13 @@ def _iter_rip_refs(
     """Yield (from_rva, target_rva, mnemonic, op_str, size) for rip-relative refs
     whose resolved target satisfies ``is_target(target_rva)``.
 
-    Two complementary passes, because neither alone is enough:
+    Two complementary passes over a shared candidate list, because neither alone is
+    enough. Both start from the same prefilter: a rip operand is always ModRM
+    mod=00 / rm=101 + disp32, so the displacement positions that could resolve to a
+    wanted target are found in C first, and everything below only looks there.
 
-    A. **Linear disassembly inside every ``.pdata`` RUNTIME_FUNCTION** intersecting
-       the range. Function bounds are exact, so linear decoding cannot drift into
+    A. **Linear disassembly inside every ``.pdata`` RUNTIME_FUNCTION** that contains
+       a candidate. Function bounds are exact, so linear decoding cannot drift into
        inter-function data the way a whole-section sweep does, and capstone handles
        every encoding form. An opcode whitelist structurally cannot: measured on
        ntdll.dll, whitelisting caps recall at ~95% and the misses are systematic —
@@ -563,12 +572,10 @@ def _iter_rip_refs(
        movdqa/movdqu) and VEX/EVEX, all of which put prefixes ahead of the opcode.
        Padding or a jump table inside a function only costs a one-byte resync.
 
-    B. **Opcode-agnostic disp32 scan over the ranges ``.pdata`` does not cover**
-       (leaf functions, hand-written asm, packed code, 32-bit images, data
-       sections). A rip operand always has ModRM mod=00 / rm=101 immediately before
-       the 4-byte displacement, so candidates are found by displacement arithmetic
-       instead of an opcode table, then confirmed by decoding from up to 8 bytes
-       back (prefixes + 1-2 byte opcode + ModRM).
+    B. **The candidates outside ``.pdata`` coverage** (leaf functions, hand-written
+       asm, packed code, 32-bit images, data sections), confirmed by decoding from up
+       to 8 bytes back (prefixes + 1-2 byte opcode + ModRM) instead of by an opcode
+       table.
 
     Args:
         is_target: predicate on the resolved target RVA (equality for one target,
@@ -577,6 +584,7 @@ def _iter_rip_refs(
         scan_gaps: run pass B. False = strict ``.pdata``-only mode, which trades
             recall outside known functions for precision in data-heavy ranges.
     """
+    import bisect
     import struct as _st
 
     from capstone import x86 as cx86
@@ -590,13 +598,42 @@ def _iter_rip_refs(
                 return insn.address + insn.size + op.mem.disp - base
         return None
 
+    # ── prefilter: where could a matching displacement possibly sit? ──
+    #
+    # A rip-relative operand is ALWAYS ModRM mod=00 / rm=101 followed by disp32, and
+    # the resolved target is fully determined by that displacement, the end of the
+    # instruction and the trailing-immediate width (0/1/2/4 — no rip form carries a
+    # wider immediate). So the offsets below are a SUPERSET of every real reference to
+    # a wanted target: the ModRM byte is found in C, and the arithmetic runs only on
+    # the ~2% of positions that pass.
+    #
+    # This is what makes pass A affordable. Linear decode with capstone costs ≈2.7 s/MB
+    # (measured on a 251 MB Chromium .text: ≈11 minutes for one query, which reads as a
+    # hang and gets killed). A .pdata function containing no candidate cannot reference
+    # the target, so it is never decoded, and a single-target query drops to seconds.
+    candidates: list[int] = []
+    for match in _RIP_MODRM.finditer(data, 0, max(n - 5, 0)):
+        i = match.start() + 1
+        disp = _st.unpack_from("<i", data, i)[0]
+        end_rva = scan_start_rva + i + 4
+        for imm in (0, 1, 2, 4):
+            if is_target(end_rva + imm + disp):
+                candidates.append(i)
+                break
+
     # ── pass A: decode .pdata-covered functions ──
     covered: list[tuple[int, int]] = []
     for begin, end, _unwind in img.exception_table():
         if end <= scan_start_rva or begin >= scan_end_rva:
             continue
         lo, hi = max(begin, scan_start_rva), min(end, scan_end_rva)
-        covered.append((lo, hi))
+        covered.append((lo, hi))  # recorded even when skipped: pass B needs the gaps
+        # No candidate displacement inside the function (widened by the longest
+        # encoding, so an instruction starting just before ``lo`` still counts) means
+        # no reference here, so there is nothing for the decoder to find.
+        k = bisect.bisect_left(candidates, lo - scan_start_rva - 8)
+        if k >= len(candidates) or candidates[k] >= hi - scan_start_rva:
+            continue
         pos = lo
         while pos < hi:
             progressed = False
@@ -614,7 +651,7 @@ def _iter_rip_refs(
     if not scan_gaps:
         return
 
-    # ── pass B: displacement scan over the uncovered remainder ──
+    # ── pass B: confirm the candidates that fall outside .pdata ──
     covered.sort()
     gaps: list[tuple[int, int]] = []
     cur = scan_start_rva
@@ -626,36 +663,37 @@ def _iter_rip_refs(
         gaps.append((cur, scan_end_rva))
 
     for lo, hi in gaps:
-        for i in range(max(lo - scan_start_rva, 1), min(hi - scan_start_rva, n - 4)):
-            if (data[i - 1] & 0xC7) != 0x05:  # ModRM: mod=00, rm=101 (rip+disp32)
-                continue
+        i_lo = max(lo - scan_start_rva, 1)
+        i_hi = min(hi - scan_start_rva, n - 4)
+        for k in range(bisect.bisect_left(candidates, i_lo), len(candidates)):
+            i = candidates[k]
+            if i >= i_hi:
+                break
             disp = _st.unpack_from("<i", data, i)[0]
             end_rva = scan_start_rva + i + 4
-            for imm in (0, 1, 2, 4):  # trailing immediate widths
-                if not is_target(end_rva + imm + disp):
+            tgt = next(t for t in (end_rva + imm + disp for imm in (0, 1, 2, 4))
+                       if is_target(t))
+            if not verify:
+                yield (scan_start_rva + i - 2, tgt, "(unverified)",
+                       "[rip%+d]" % disp, 0)
+                continue
+            # Walk back from the longest possible encoding: prefixes sit ahead
+            # of the opcode, so the outermost start that still ends at this
+            # displacement is the real instruction. Taking the innermost would
+            # report the REX-less alias (``8B 05`` inside ``48 8B 05``), which
+            # resolves to the same target but is not a real reference site.
+            for back in range(8, 1, -1):
+                if i - back < 0:
                     continue
-                if not verify:
-                    yield (scan_start_rva + i - 2, end_rva + imm + disp,
-                           "(unverified)", "[rip%+d]" % disp, 0)
+                insn = next(iter(md.disasm(data[i - back:i - back + 16],
+                                          base + scan_start_rva + i - back)), None)
+                if insn is None or insn.size < back + 4:
+                    continue  # displacement not inside this instruction
+                hit = rip_target(insn)
+                if hit is not None and is_target(hit):
+                    yield (insn.address - base, hit,
+                           insn.mnemonic, insn.op_str, insn.size)
                     break
-                # Walk back from the longest possible encoding: prefixes sit ahead
-                # of the opcode, so the outermost start that still ends at this
-                # displacement is the real instruction. Taking the innermost would
-                # report the REX-less alias (``8B 05`` inside ``48 8B 05``), which
-                # resolves to the same target but is not a real reference site.
-                for back in range(8, 1, -1):
-                    if i - back < 0:
-                        continue
-                    insn = next(iter(md.disasm(data[i - back:i - back + 16],
-                                              base + scan_start_rva + i - back)), None)
-                    if insn is None or insn.size < back + 4:
-                        continue  # displacement not inside this instruction
-                    tgt = rip_target(insn)
-                    if tgt is not None and is_target(tgt):
-                        yield (insn.address - base, tgt,
-                               insn.mnemonic, insn.op_str, insn.size)
-                        break
-                break
 
 
 

@@ -329,7 +329,7 @@ B8 6C 75 65 00                   mov eax, imm32     -> "lue\0"
 - `func_begin_rva` 为 None 很常见：内联构造多出现在没有 `.pdata` 条目的小叶函数里
 
 
-**Step 2.5 — rip 索引（同一文件多次查询时建一次）**
+**Step 2.5 — rip 索引（同一文件要查几十次时才建）**
 
 ```bash
 fp binary index-build target.dll
@@ -337,8 +337,9 @@ fp binary xrefs-rva target.dll --target 0x1234abcd --kinds rip
 fp binary index-info target.dll
 ```
 
-- 建索引后 rip 查询变成数据库查询（ntdll 实测 3.9s 建索引，后续查询 ~0s）
-- 索引按文件哈希校验：修改过的文件自动回退到实时扫描
+- 单目标查询本身已经不慢：rip 操作数必然是 `ModRM mod=00/rm=101 + disp32`，工具先用字节类正则在 C 层找出可能落到目标的位移，只反汇编含候选的 `.pdata` 函数。251 MB `.text` 全量扫描（覆盖率 100%）**实测 5.6 s**
+- **`index-build` 不是首次查询的捷径**：它要记录指向所有数据地址的引用，候选几乎全部命中，等于付掉单目标查询省下的那次全量反汇编（同一文件约 11 分钟）。值不值得取决于后面还要查多少次
+- 索引按文件哈希校验：修改过的文件自动回退到实时扫描，且超出索引覆盖范围的查询会回退而不是返回一个看似权威的短列表
 - 只缓存 rip 引用；call/jmp/ptr 仍实时扫描
 
 **Step 3 — 收敛到函数（func-bounds → disasm → field-refs）**
