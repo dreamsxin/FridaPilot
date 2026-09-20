@@ -409,6 +409,9 @@ FridaPilot 暴露标准 MCP 工具，可被 Claude Desktop、Cursor、自研 Age
 ```text
 # ── 动态分析（Frida）──
 frida_list_processes      # 列出进程
+frida_attach              # 附加到进程
+frida_spawn               # 启动并附加（挂起状态）
+frida_detach              # 断开会话
 frida_enumerate_modules   # 枚举模块（分页）
 frida_enumerate_classes   # 枚举类（分页）
 frida_enumerate_methods   # 枚举方法（分页）
@@ -428,18 +431,36 @@ frida_call_function       # 调用目标进程函数
 # ── 静态二进制分析 ──
 binary_analyze_pe         # PE 文件完整分析
 binary_analyze_elf        # ELF 文件完整分析
-binary_disassemble        # 反汇编（自动检测架构）
+binary_disassemble        # 反汇编（文件偏移，自动检测架构）
 binary_find_strings       # 增强字符串提取
 binary_search_bytes       # 字节模式搜索（?? 通配符）
-binary_xrefs              # 交叉引用查找
+binary_xrefs              # 交叉引用查找（文件偏移）
 binary_analyze_go         # Go 二进制分析
+
+# ── RVA-aware PE 分析（ImageBase 正确，适用于超大 DLL）──
+binary_find_string_rva    # 定位字符串并返回 RVA
+binary_xrefs_rva          # RVA 交叉引用（rip 数据引用 + call/jmp，支持 pdata_only）
+binary_func_bounds        # 从 .pdata 取函数边界
+binary_disasm_rva         # RVA-aware 反汇编（rip/call 目标标注）
+binary_field_refs         # 结构体字段 [reg+offset] 读写定位
+
+# ── 加壳检测 ──
+unpack_detect             # 识别壳类型（UPX/VMProtect/Themida/ASPack）+ 节熵证据
+unpack_auto               # 检测 → 尝试 UPX 脱壳 → 报告后续手段
+
+# ── Android APK/DEX（离线，无需设备）──
+apk_analyze               # manifest / 权限 / 组件 / native 库 / 签名 / 保护特征
+apk_analyze_dex           # DEX header / 类 / 方法 / 字符串
+apk_protections           # Root/SSL pinning/Frida/模拟器检测与加固壳特征（带命中证据）
 ```
 
 生产级特性：
 - **分页**：所有枚举工具支持 offset/limit 分页
-- **路径白名单**：`FRIDAPILOT_ALLOWED_DIRS` 环境变量限制可分析目录
+- **路径白名单**：`FRIDAPILOT_ALLOWED_DIRS` 限制可分析目录，作用于所有带路径参数的工具
 - **审计日志**：所有 MCP 工具调用自动记录
 - **标准化响应**：统一 `{success, data, error, duration}` 格式
+- **SDK 版本**：使用 MCP 1.x 低层 API（`@server.list_tools()` / `@server.call_tool()`），依赖已约束为 `mcp>=1.0,<2`
+
 
 ## Agent 工作流（需要 LLM）
 
@@ -564,7 +585,8 @@ fridapilot/
 - **闭环自动化**：生成 → 注入 → 观测 → 修复，不只是单次脚本生成
 - **运行时上下文感知**：先侦察再生成，减少 LLM 幻觉
 - **静态 + 动态一体化**：PE/ELF 静态分析 + Frida 动态 Hook，同一工具链覆盖完整 RE 流程
-- **MCP 标准化**：23+ MCP 工具，可被 Claude Desktop / Cursor / 任意 Agent 调用
+- **MCP 标准化**：36 个 MCP 工具，可被 Claude Desktop / Cursor / 任意 Agent 调用
+
 - **生产级安全**：路径白名单、审计日志、标准化错误响应
 - **Electron / Node / 移动端 / Go 统一支持**
 - **CLI-first**：无 LLM 也能完成完整工作流，安全人员即插即用

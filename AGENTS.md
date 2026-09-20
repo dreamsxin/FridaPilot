@@ -32,10 +32,10 @@ pip install -e ".[agent,mcp]"  # LLM planner, MCP server
 
 python -m pytest               # whole suite; Windows-only cases skip elsewhere
 python -m pytest tests/test_pe_rva.py -q
-ruff check <files you touched>  # the repo is not ruff-clean yet (~67 pre-existing
-                                # findings, mostly F401/F541/E402) - just do not add more
+ruff check fridapilot tests    # clean as of this commit - keep it that way
 python -m fridapilot.cli.main --help    # same as `fp --help` without installing
 ```
+
 
 
 There is no CI configuration in this repo. Run the suite yourself before committing.
@@ -62,9 +62,15 @@ several newer tool modules (`apk_analysis`, `unpacker`, `debugger`, `lldb_bridge
 dataclasses. Both patterns exist — match the module you are editing rather than converting it
 as a side effect. CLI code that serialises a dataclass uses `dataclasses.asdict`.
 
-**The MCP server (`mcp/server.py`) has its own hand-written `Tool(...)` list.** It is currently
-behind the Python API — the APK tools are not exposed there. Adding a tool to the Agent does not
-add it to MCP.
+**The MCP server (`mcp/server.py`) has its own hand-written `Tool(...)` list and its own
+`if name == ...` dispatch chain.** Adding a tool to the Agent does not add it to MCP: you must
+append a `Tool(...)` with a JSON schema *and* a dispatch branch, and add the argument name to
+`PATH_ARGUMENTS` if it carries a filesystem path so the whitelist covers it.
+*(enforced: `tests/test_mcp.py` — declaration/dispatch parity, schema shape, path coverage)*
+It targets the MCP 1.x low-level decorator API; 2.x removed `@server.list_tools()`, which is why
+the dependency is pinned `mcp>=1.0,<2`.
+
+
 
 ## Testing
 
