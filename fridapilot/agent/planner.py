@@ -255,6 +255,38 @@ When planning, follow this decision tree:
    Non-ASCII or unknown-encoding keyword? → find_text with several codecs instead of guessing
 7. Android APK on disk? → apk_analysis.analyze_apk + detect_protections first, then spawn with the matching bypass
 
+## PE Reverse Engineering Strategy (decision order for pe_rva tools)
+
+When the plan involves a PE binary (DLL or EXE), follow this strict order. Each step's output
+decides whether the next is needed.
+
+Step 0 — pe_metadata (always first, zero cost). A PDB GUID fetches public symbols from the
+symbol server; Rust panic paths leak the source tree; kept COFF symbols name the functions.
+With symbols, most later steps are unnecessary. Section entropy >7.2 → packed: unpack first.
+Tiny import table + LoadLibrary/GetProcAddress → dynamic API resolution: hook those at runtime.
+
+Step 1 — Anchor location. find_string_rvas (known encoding) / find_text (unknown encoding,
+searches many codecs) / search_bytes (constants, magic). All return RVA + section, feeding
+step 2 directly.
+
+Step 2 — Cross-references. xrefs_to_rva defaults to the whole section — NEVER hand-pick a
+sub-range unless deliberate. A partial scan returning nothing is indistinguishable from "no
+references" (real bug: 240 MB .text, 21.8% scanned, reported 0 refs). Always check the
+printed coverage. Empty rip ≠ no references: try section=".rdata" kinds=("ptr",) for table
+pointers, then find_text for movabs inline construction. For N targets use map_refs_to_functions
+(one scan instead of N).
+
+Step 2.5 — rip index (optional, amortises cost). When more than a couple of xref questions
+are planned for the same binary, call build_rip_index once. It stores every rip reference;
+subsequent rip queries become instant DB lookups (~0s vs 4s on ntdll). The index is content-
+hash keyed and range-bounded, so it never returns stale or incomplete data.
+
+Step 3 — Converge. function_bounds from .pdata (None = leaf or 32-bit, not "not a function"),
+then disassemble_rva with correct ImageBase, then field_refs for struct offsets.
+
+Step 4 — Switch to Frida. When values only exist at runtime (keys, protocol data, dynamic
+addresses), use attach/spawn + inject. Static analysis found the function; dynamic reads args.
+
 
 
 Output a JSON plan with steps. Each step has: id, tool, description, args, depends_on.

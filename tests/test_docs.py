@@ -34,8 +34,10 @@ from .synthetic_pe import MARKER_TEXT, TARGET_RVA, TEXT_RVA, TEXT_VSIZE, write_s
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS = [
     REPO_ROOT / "AGENTS.md",
+    REPO_ROOT / "README.md",
     REPO_ROOT / "skills" / "fridapilot-pe-analysis" / "SKILL.md",
 ]
+
 
 FENCE = re.compile(r"^```(\w+)\s*$(.*?)^```\s*$", re.MULTILINE | re.DOTALL)
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
@@ -184,7 +186,12 @@ def _cli_lines(text: str) -> list[tuple[str, str]]:
                 add("bash", raw.strip())
 
     for span in INLINE_CODE.findall(text):
-        add("inline", span.strip())
+        stripped = span.strip()
+        # Spans with angle brackets are schematic placeholders (e.g. `fp inject --script <file>`)
+        # in command-reference tables, not real invocations.
+        if "<" in stripped or ">" in stripped:
+            continue
+        add("inline", stripped)
 
     return found
 

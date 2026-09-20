@@ -382,6 +382,47 @@ Practical order of work:
 4. `func-bounds` to pin the function, then `disasm-rva` / `field-refs` inside it
 5. `map-refs` when you have N targets and no index — never loop `xrefs-rva` N times
 
+## Decision Strategy
+
+Follow this order on every PE target. Each step's output decides whether the next is needed.
+
+**Step 0 — `pe_metadata` (always first, zero cost).** A PDB GUID fetches public symbols from
+the Microsoft symbol server; Rust panic paths leak the source tree; kept COFF symbols name the
+functions. If any of these are present, most of the later steps become unnecessary — plan
+around the names you already have. Section entropy >7.2 means packed/encrypted data: unpack
+before disassembling. A tiny import table with `LoadLibrary`/`GetProcAddress` signals dynamic
+API resolution — hook those two functions at runtime instead of reading the imports.
+
+**Step 1 — Anchor location.** Use `find-string-rva` when the encoding is known (UTF-8/UTF-16),
+`find-text` when it is not (searches multiple codecs simultaneously), and `search-bytes` for
+constants, magic values, or instruction patterns. All return RVA + section, so results feed
+directly into step 2.
+
+**Step 2 — Cross-references.** `xrefs-rva` defaults to scanning the whole section. Do NOT
+hand-pick a sub-range unless you genuinely intend a narrow search — a partial scan that returns
+nothing is indistinguishable from "this target has no references", and that exact mistake
+happened on a 240 MB `.text`. Always check the printed coverage percentage. If `rip` finds
+nothing for a string that is obviously used, rescan `.rdata` with `kinds=("ptr",)` (Chromium
+collects `const char*` into arrays and only LEAs the array base). If that also finds nothing,
+the string may be built inline via `movabs` — `find-text` can locate it directly in `.text`.
+For N targets use `map-refs`, which scans once.
+
+**Step 2.5 — rip index (optional, amortises cost).** When the investigation will ask more than
+a couple of xref questions on the same binary, run `index-build` once. It scans every `.pdata`
+function and stores every rip reference whose target lands in a data section. Afterwards
+`xrefs-rva --kinds rip` becomes a database query (~0s vs 4s on ntdll). The index is keyed by
+file content hash and refuses queries outside its recorded range, so it never returns stale or
+incomplete data. `--no-index` forces a rescan; `kinds` other than `rip` still scan.
+
+**Step 3 — Converge.** `func-bounds` gives the exact function extent from `.pdata` (None means
+no `.pdata` entry — leaf function or 32-bit image, not "not a function"). `disasm-rva` reads
+the function with correct ImageBase and annotates rip/call targets. `field-refs` locates struct
+field accesses at a given offset.
+
+**Step 4 — Switch to Frida.** When values only exist at runtime (encryption keys, protocol
+contents, dynamically resolved addresses), switch to `fp attach`/`fp dbg`/`fp inject`. Static
+analysis found the function; dynamic analysis reads its arguments.
+
 
 ## Gotchas
 

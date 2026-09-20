@@ -64,15 +64,15 @@ fp recon classes --target com.example.app --filter "com.example.*"
 fp recon methods --target com.example.app --class "com.example.MainActivity"
 
 # 使用内置模板
-fp template ssl-bypass --target com.example.app
-fp template crypto-monitor --target com.example.app
+fp template ssl-bypass
+fp template crypto-monitor
 
 # 收集消息并输出报告
 fp observe --target com.example.app --script hook.js --output report.md
 
 # （需要 LLM）自然语言任务
 fp run "监控 Electron 应用所有 IPC 调用并打印参数" --target YourApp
-fp run "找到 Android 登录校验函数并打印入参和返回值" --device usb --spawn com.example.app
+fp run "找到 Android 登录校验函数并打印入参和返回值" --target com.example.app --device usb
 
 # Python Agent 脚本（各平台一键逆向）
 python -m fridapilot.scripts.electron_agent --target YourApp.exe
@@ -97,8 +97,6 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp recon exports` | 枚举模块导出符号 | ❌ |
 | `fp template <name>` | 使用内置脚本模板 | ❌ |
 | `fp observe` | 收集 send/console/异常消息 | ❌ |
-| `fp dump memory` | Dump 内存区域 | ❌ |
-| `fp dump strings` | 提取内存中的字符串 | ❌ |
 | `fp bypass ssl-pinning` | 绕过 SSL Pinning | ❌ |
 | `fp bypass anti-debug` | 绕过反调试检测 | ❌ |
 | `fp report` | 生成 Markdown/JSON 报告 | ❌ |
@@ -244,6 +242,82 @@ fp binary disasm-rva target.dll --rva 0x1000 -n 60 --symbols 0x1234abcd:parse_fi
 - xrefs 支持 rip-relative 数据引用扫描（定位"代码在哪里按 RVA 引用某字符串/全局"）
 
 典型工作流：`find-string-rva` 拿到字段名 RVA → `xrefs-rva` 找到解析该字段的代码 → `disasm-rva` 反汇编确认逻辑。Python SDK 亦可 `from fridapilot.tools.pe_rva import PEImage, disassemble_rva, xrefs_to_rva, find_string_rvas`。
+
+### PE 逆向分析策略（决策顺序）
+
+对任何本地 PE 文件，按以下优先级推进。每一步的结果决定后续步骤是否必要。
+
+**Step 0 — 元数据侦察（必做，零成本）**
+
+```bash
+fp binary metadata target.dll
+```
+
+- PDB GUID → 从符号服务器拉公开符号，有符号后大部分反汇编工作可跳过
+- Rust panic 路径 → 源码目录树即使 strip 后仍保留
+- COFF 符号 → MinGW 编译常保留，直接给出函数名
+- 节熵 >7.2 → 加壳/加密数据，先脱壳再分析
+- 极少导入 + `LoadLibrary`/`GetProcAddress` → 动态 API 解析，Hook 这两个函数而非读导入表
+
+**Step 1 — 锚点定位（字符串/字节搜索）**
+
+```bash
+fp binary find-string-rva target.dll "config_key,error_msg"
+fp binary find-text target.dll --text "许可过期" --encodings utf8,utf16le,gbk
+fp binary search-bytes target.dll "48 8b ?? 48 89"
+```
+
+- `find-string-rva`：已知编码时用，返回 RVA 供后续 xref
+- `find-text`：不知道编码时用，多编码同时搜
+- `search-bytes`：搜常量/magic/字节模式
+
+**Step 2 — 交叉引用（一次扫描，检查覆盖率）**
+
+```bash
+fp binary xrefs-rva target.dll --target 0x1234abcd
+fp binary xrefs-rva target.dll --target 0x1234abcd --section .rdata --kinds ptr
+fp binary map-refs target.dll --strings "key_a,key_b,key_c"
+```
+
+- 范围默认整个 `.text` 节，**不要手动缩小范围**（已导致 240 MB `.text` 上的假阴性）
+- 检查打印的覆盖率百分比：低于 100% 说明扫描不完整
+- `rip` 找不到时试 `--section .rdata --kinds ptr`（表指针）
+- 多目标用 `map-refs` 一次扫描，不要循环调用 `xrefs-rva`
+- 仍找不到 → 字符串可能是 `movabs` 内联构造（寄存器拼装），此时 `find-text` 在 `.text` 中能定位
+
+**Step 2.5 — rip 索引（同一文件多次查询时建一次）**
+
+```bash
+fp binary index-build target.dll
+fp binary xrefs-rva target.dll --target 0x1234abcd --kinds rip
+fp binary index-info target.dll
+```
+
+- 建索引后 rip 查询变成数据库查询（ntdll 实测 3.9s 建索引，后续查询 ~0s）
+- 索引按文件哈希校验：修改过的文件自动回退到实时扫描
+- 只缓存 rip 引用；call/jmp/ptr 仍实时扫描
+
+**Step 3 — 收敛到函数（func-bounds → disasm → field-refs）**
+
+```bash
+fp binary func-bounds target.dll --rva 0xc43500
+fp binary disasm-rva target.dll --rva 0xc43500 --count 60
+fp binary field-refs target.dll --offset 0xB0
+```
+
+- `func-bounds` 从 `.pdata` 取精确边界；返回 None 不代表"不是函数"（叶函数可能没有 .pdata 条目）
+- `disasm-rva` ImageBase 正确、rip/call 目标自动标注
+- `field-refs` 定位结构体字段读写（如 `this->field_ at +0xB0`）
+
+**Step 4 — 转入动态分析（运行时才有的值）**
+
+当静态分析已定位关键函数但需要运行时数据（加密密钥、协议内容、动态解析的地址）时，切换到 Frida：
+
+```bash
+fp attach 1234
+fp inject --target YourApp.exe --script hook.js
+fp crypto hook-bcrypt --target YourApp.exe
+```
 
 ### Crypto Reverse — 二进制加密逆向分析
 
