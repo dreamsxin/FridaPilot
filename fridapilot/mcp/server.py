@@ -384,7 +384,32 @@ def frida_call_function(
 
 
 @mcp.tool()
+def binary_metadata(
+    binary_path: str,
+) -> dict[str, Any]:
+    """Metadata recon for a PE: PDB path + GUID/age + symbol-server key, version resource,
+    manifest, Rich header, COFF symbols, toolchain guess, Rust panic source paths, section
+    entropy, dynamic-API-resolution signal. Run this before any disassembly - a PDB GUID or a
+    Rust source tree makes most of the later work unnecessary."""
+    return _dispatch("binary_metadata", {"binary_path": binary_path})
+
+
+@mcp.tool()
+def binary_find_text(
+    binary_path: str, text: str, encodings: list[str] | None = None, limit: int = 50,
+) -> dict[str, Any]:
+    """Locate one piece of text encoded several ways at once (ascii, utf8, utf16le, gbk,
+    gb18030, big5, cp932, cp949, cp1251, cp1252, latin1) and report offset + RVA + section.
+    Use when the encoding is unknown; the encodings that hit tell you how the binary stores
+    text. Codecs that cannot represent the text are skipped."""
+    return _dispatch("binary_find_text", {
+        "binary_path": binary_path, "text": text, "encodings": encodings, "limit": limit,
+    })
+
+
+@mcp.tool()
 def binary_find_string_rva(
+
     binary_path: str, needles: list[str], encoding: str = 'ascii',
 ) -> dict[str, Any]:
     """Locate exact strings in a PE and report their RVA and file offset. Start here:
@@ -911,7 +936,19 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
 
     # ── RVA-aware PE analysis ──
 
+    if name == "binary_metadata":
+        from fridapilot.tools.pe_metadata import pe_metadata
+        return pe_metadata(arguments["binary_path"])
+
+    if name == "binary_find_text":
+        from fridapilot.tools.binary_analysis import find_text
+        encodings = arguments.get("encodings") or ["ascii", "utf8", "utf16le", "gbk"]
+        return [m.model_dump() for m in find_text(
+            arguments["binary_path"], arguments["text"],
+            encodings=tuple(encodings), limit=int(arguments.get("limit", 50)))]
+
     if name == "binary_find_string_rva":
+
         from fridapilot.tools.pe_rva import find_string_rvas
         return find_string_rvas(arguments["binary_path"], list(arguments["needles"]),
                                 arguments.get("encoding", "ascii"))

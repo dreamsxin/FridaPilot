@@ -168,14 +168,28 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 - crypto_reverse.scan_binary(path) -> Scan for crypto indicators (S-Box, API imports, protection level L0-L5)
 - crypto_reverse.get_bcrypt_hook_script() -> Hook Windows BCrypt API (captures keys/IVs at runtime)
 
+### Metadata Recon (run FIRST on any local binary - zero cost, often decides the rest)
+- pe_metadata.pe_metadata(path) -> PDB path + GUID/age + symbol-server key, version resource
+  (company/product/original filename), manifest (UAC/DPI), Rich header build records, COFF symbols
+  when the linker kept them, toolchain guess (rust/go/msvc/mingw/dotnet/electron/pyinstaller),
+  Rust panic source paths and crate list, per-section entropy, dynamic-API-resolution signal
+  Why first: a PDB GUID pulls public symbols off the symbol server and a Rust panic path spells
+  out the original source tree - both shrink the disassembly work by an order of magnitude
+- binary_analysis.find_text(path, text, encodings) -> locate ONE string encoded several ways at
+  once (ascii/utf8/utf16le/gbk/big5/cp932/cp949/cp1251/...); returns offset + RVA + section.
+  Use when the encoding is unknown: the encodings that hit tell you how the binary stores text
+
 ### Static Binary Analysis (no running process needed)
 - binary_analysis.analyze_pe(path) -> PE header/section/import/export/debug info (shows what DLLs and APIs are used)
 - binary_analysis.analyze_elf(path) -> ELF header/section/symbol/dynamic libs
 - binary_analysis.analyze_macho(path) -> Mach-O (incl. FAT): segments, load commands, dylibs, cryptid
 
 - binary_analysis.disassemble(path, address, count, arch) -> Disassemble at file offset (auto-detects arch)
-- binary_analysis.find_strings(path, min_len, encoding, limit) -> Extract strings (ASCII + UTF-16LE + UTF-8)
+- binary_analysis.find_strings(path, min_len, encoding, limit, codepage) -> Extract strings
+  (ASCII + UTF-16LE + UTF-8, plus an explicit legacy code page such as gbk/cp932/cp1251).
+  PE hits carry rva + section, so they feed pe_rva.xrefs_to_rva directly
   Pro tip: Filter for "encrypt", "pipe", "token", "verify", "license", "exit", "error" to find key functions
+
 - binary_analysis.search_bytes(path, pattern, limit) -> Byte pattern search with ?? wildcards
   Pro tip: Search for exit code values (e.g., search for little-endian int 0x2710 = 10000) to find validation code
 - binary_analysis.xrefs_to(path, target_address) -> Find CALL/JMP references to a function
@@ -213,13 +227,18 @@ native libs, dex count, signing info, protection indicators
 ## Planning Strategy
 
 When planning, follow this decision tree:
-1. Is the target a binary file on disk? → Start with static analysis (analyze_pe/elf, crypto_scan, find_strings)
+0. Any PE on disk? → pe_metadata.pe_metadata FIRST. If it yields a PDB GUID, kept COFF symbols,
+   Rust panic paths or a vendor version resource, plan around those names instead of scanning
+   blind; symbols make most of the later steps unnecessary
+1. Is the target a binary file on disk? → Then static analysis (analyze_pe/elf, crypto_scan, find_strings)
 2. Is it a Go binary? → Add analyze_go_binary (free rich metadata)
 3. Need to understand crypto? → crypto_scan first, then hook BCrypt/OpenSSL at runtime
 4. Need to hook a running process? → attach/spawn → enumerate_modules → enumerate_exports → inject
 5. Electron app? → Use electron-comprehensive template, check for multiple processes
 6. Need to find a specific function? → find_strings + search_bytes to locate, then disassemble + xrefs_to
+   Non-ASCII or unknown-encoding keyword? → find_text with several codecs instead of guessing
 7. Android APK on disk? → apk_analysis.analyze_apk + detect_protections first, then spawn with the matching bypass
+
 
 
 Output a JSON plan with steps. Each step has: id, tool, description, args, depends_on.

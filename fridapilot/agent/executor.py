@@ -45,7 +45,9 @@ def _register_tools() -> None:
     from fridapilot.tools import recon, injector, script_forge, bypass, crypto_reverse
     from fridapilot.tools import binary_analysis
     from fridapilot.tools import pe_rva
+    from fridapilot.tools import pe_metadata as pe_metadata_mod
     from fridapilot.tools import unpacker as unpacker_mod
+
     from fridapilot.tools import apk_analysis
     from fridapilot.tools.lldb_bridge import LLDBBridge
 
@@ -73,9 +75,13 @@ def _register_tools() -> None:
         "binary_analysis.analyze_elf": binary_analysis.analyze_elf,
         "binary_analysis.disassemble": binary_analysis.disassemble,
         "binary_analysis.find_strings": binary_analysis.find_strings,
+        "binary_analysis.find_text": binary_analysis.find_text,
         "binary_analysis.search_bytes": binary_analysis.search_bytes,
         "binary_analysis.xrefs_to": binary_analysis.xrefs_to,
         "binary_analysis.analyze_go_binary": binary_analysis.analyze_go_binary,
+        # Metadata recon - cheapest pass, belongs before any disassembly
+        "pe_metadata.pe_metadata": pe_metadata_mod.pe_metadata,
+
         # PE RVA-aware analysis tools
         "pe_rva.find_string_rvas": pe_rva.find_string_rvas,
         "pe_rva.xrefs_to_rva": pe_rva.xrefs_to_rva,
