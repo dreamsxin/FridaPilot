@@ -106,11 +106,14 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp crypto hook-bcrypt` | Hook Windows BCrypt API 捕获运行时密钥 | ❌ |
 | `fp crypto bruteforce` | 暴力搜索二进制中的 AES 密钥 | ❌ |
 | `fp crypto xor` | XOR 反混淆（单字节爆破 / 已知明文 / 已知密钥） | ❌ |
+| `fp binary metadata <file>` | **元数据侦察（先跑这个）**：PDB GUID + 符号服务器 key、版本资源、manifest、Rich header、COFF 符号、工具链指纹、Rust 源码路径、节熵 | ❌ |
 | `fp binary analyze-pe <file>` | PE 文件完整分析（header/section/import/export） | ❌ |
 | `fp binary analyze-elf <file>` | ELF 文件完整分析（header/section/symbol） | ❌ |
 | `fp binary disassemble` | 指定偏移反汇编（自动检测架构） | ❌ |
-| `fp binary find-strings <file>` | 增强字符串提取（ASCII/UTF-16LE/UTF-8） | ❌ |
-| `fp binary search-bytes <file> <pattern>` | 字节模式搜索（支持 `??` 通配符） | ❌ |
+| `fp binary find-strings <file>` | 字符串提取（ASCII/UTF-16LE/UTF-8 + `--codepage gbk/cp932/cp1251` 等 ANSI 代码页），PE 附带 RVA/节名 | ❌ |
+| `fp binary find-text <file> --text <串>` | 同一个串按多种编码同时搜（不知道编码时用），返回 RVA/节名/命中编码 | ❌ |
+| `fp binary search-bytes <file> <pattern>` | 字节/十六进制搜索（支持 `??` 通配符），PE 附带 RVA/节名 | ❌ |
+
 | `fp binary xrefs --address <addr>` | 交叉引用查找（CALL/JMP） | ❌ |
 | `fp binary analyze-go <file>` | Go 二进制分析（版本/包/函数/源码路径） | ❌ |
 | `fp binary find-string-rva <file>` | 定位字符串并返回 RVA（区分文件偏移/RVA） | ❌ |
@@ -438,7 +441,10 @@ binary_xrefs              # 交叉引用查找（文件偏移）
 binary_analyze_go         # Go 二进制分析
 
 # ── RVA-aware PE 分析（ImageBase 正确，适用于超大 DLL）──
+binary_metadata           # 元数据侦察：PDB GUID/符号服务器 key、版本资源、manifest、工具链、Rust 源码路径
+binary_find_text          # 同一串按多种编码同时搜（ascii/utf8/utf16le/gbk/big5/cp932/...），返回 RVA
 binary_find_string_rva    # 定位字符串并返回 RVA
+
 binary_xrefs_rva          # RVA 交叉引用（rip 数据引用 + call/jmp，支持 pdata_only）
 binary_func_bounds        # 从 .pdata 取函数边界
 binary_disasm_rva         # RVA-aware 反汇编（rip/call 目标标注）
@@ -586,7 +592,8 @@ fridapilot/
 - **闭环自动化**：生成 → 注入 → 观测 → 修复，不只是单次脚本生成
 - **运行时上下文感知**：先侦察再生成，减少 LLM 幻觉
 - **静态 + 动态一体化**：PE/ELF 静态分析 + Frida 动态 Hook，同一工具链覆盖完整 RE 流程
-- **MCP 标准化**：36 个 MCP 工具，可被 Claude Desktop / Cursor / 任意 Agent 调用
+- **MCP 标准化**：38 个 MCP 工具，可被 Claude Desktop / Cursor / 任意 Agent 调用
+
 
 - **生产级安全**：路径白名单、审计日志、标准化错误响应
 - **Electron / Node / 移动端 / Go 统一支持**

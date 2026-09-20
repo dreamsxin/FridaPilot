@@ -156,5 +156,13 @@ If a signature changes, fix the docs in the same commit — the test will point 
   targets instead of N scans.
 - **Substring matching on identifiers.** Short indicators must match on token boundaries;
   `"su" in blob` fires on `issue`, `consumer` and `resume`.
+- **String extraction is encoding-blind by default.** The ASCII scanner accepts only 0x20-0x7e,
+  so GBK / Shift-JIS / CP1251 text is invisible to it; pass an explicit `codepage`, or use
+  `find_text` to search one string under several codecs. Legacy code pages decode almost any
+  high-byte pair, so a plausibility filter is mandatory or the output is mojibake.
+- **Metadata before disassembly.** `pe_metadata` is the cheapest pass in the tree: a PDB GUID
+  fetches public symbols, Rust panic strings carry the original source paths, kept COFF symbols
+  name the functions. Reaching for the disassembler first wastes most of that.
+
 - **Frida sessions.** `fp dbg` commands act on the active session (`session switch`); state that
   is only written and never read is the bug to look for when a command "does nothing".

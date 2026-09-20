@@ -37,15 +37,61 @@ pip install -e .
 ## Workflow
 
 ```
+0. pe_metadata()             what the build leaked: PDB GUID, version, toolchain, Rust paths
 1. find_string_rvas()        locate config keys / messages by content  -> RVAs
+   find_text()               ... when the encoding is unknown (UTF-16/GBK/Shift-JIS)
 2. xrefs_to_rva()            find the code that references them        -> from_rva
 3. function_bounds()         exact enclosing function from .pdata      -> begin/end
 4. disassemble_rva()         read the function with correct ImageBase
 5. field_refs()              find accesses to this->field_ at +offset
 ```
 
-Use `map_refs_to_functions()` instead of step 2 when you have many targets: it scans once and
-groups by `.pdata` function.
+Step 0 is not optional politeness — it is the step that decides how much of the rest you need.
+A PDB GUID pulls public symbols off the symbol server; a Rust panic path spells out the original
+source tree; kept COFF symbols name the functions outright. Use `map_refs_to_functions()` instead
+of step 2 when you have many targets: it scans once and groups by `.pdata` function.
+
+## Step 0: metadata recon
+
+```python
+from fridapilot.tools.pe_metadata import pe_metadata
+
+meta = pe_metadata("app.exe")
+meta["debug"]["symbol_server_key"]   # 'app.pdb/<32-hex GUID><age hex>/app.pdb'
+meta["version_info"]["CompanyName"]
+meta["toolchain"]["guesses"]         # ['rust'], ['go'], ['msvc'], ['dotnet'], ...
+meta.get("rust", {}).get("own_source_paths")
+```
+
+<!-- return-keys: pe_metadata = filepath, machine, is_dll, is_dotnet, timestamp, debug, version_info, manifest, rich_header, coff_symbols, resources, security, sections, dynamic_api_resolution, toolchain -->
+Keys: `filepath`, `machine`, `is_dll`, `is_dotnet`, `timestamp`, `debug`, `version_info`,
+`manifest`, `rich_header`, `coff_symbols`, `resources`, `security`, `sections`,
+`dynamic_api_resolution`, `toolchain` — plus `rust` when Rust markers are present.
+
+What to do with each:
+
+- `debug.symbol_server_key` — fetch public symbols (`https://msdl.microsoft.com/download/symbols/<key>`).
+  The GUID is 32 hex chars with the first three fields little-endian; the age is appended in hex.
+- `debug.pdb_path` — leaks the build machine's user name and project directory even when the PDB
+  itself was never shipped.
+- `toolchain.guesses` + `rust.own_source_paths` — Rust embeds `file!()` for every `panic!`, so the
+  source tree survives symbol stripping. `rust.crates` lists dependency names and versions.
+- `coff_symbols` — non-empty means the linker kept the COFF symbol table (common with MinGW).
+- `version_info` / `manifest` — vendor labels and the requested UAC level.
+- `dynamic_api_resolution.suspicious` — a tiny import table plus `LoadLibrary`/`GetProcAddress`
+  means the real API set is resolved at runtime; hook those two instead of reading the imports.
+- `sections[].entropy` — above ~7.2 is packed or encrypted data, not code to disassemble.
+
+```bash
+fp binary metadata app.exe
+fp binary metadata app.exe --json
+```
+
+## Workflow (tool reference)
+
+## Python SDK
+
+
 
 ## Python SDK
 
@@ -80,7 +126,47 @@ fp binary find-string-rva chrome.dll "宽字符" --encoding utf16le --json
 
 Needles are **one comma-separated argument**, not separate arguments.
 
+### find_text / find_strings — when the encoding is the unknown
+
+`find_string_rvas` needs you to name the encoding (`ascii`, which encodes the needle as UTF-8, or
+`utf16le`). When you do not know how the binary stores the text, search several codecs at once:
+
+```python
+from fridapilot.tools.binary_analysis import find_strings, find_text
+
+hits = find_text("app.exe", "\u8bb8\u53ef\u8fc7\u671f",
+                 encodings=("utf8", "utf16le", "gbk", "big5", "cp932"))
+```
+
+<!-- return-keys: find_text = offset, value, encoding, rva, section -->
+Rows: `offset`, `value`, `encoding`, `rva`, `section`. Codecs that cannot represent the text are
+skipped, and codecs producing identical bytes are merged into one hit labelled `ascii/gbk/...` —
+so the encodings that appear are the ones the binary actually uses.
+
+Bulk extraction understands legacy code pages too. The ASCII pass only accepts bytes 0x20-0x7e,
+so GBK / Shift-JIS / CP1251 text is invisible to it:
+
+```python
+strings = find_strings("app.exe", min_len=4, encoding="all", codepage="gbk")
+```
+
+<!-- return-keys: find_strings = offset, value, encoding, rva, section -->
+Nearly any high-byte pair decodes to *something* in GBK, so the code page pass keeps a run only
+when the decoded text passes a plausibility check — expect it to be quieter than `strings`.
+
+```bash
+fp binary find-text app.exe --text "license expired" --encodings ascii,utf16le,gbk
+fp binary find-strings app.exe --codepage gbk --min-len 4 --filter 许可
+fp binary search-bytes app.exe "48 8b ?? 48 89" --limit 20
+```
+
+<!-- return-keys: search_bytes = offset, matched_bytes, rva, section -->
+`search-bytes` (hex, `??` wildcards) and both string commands report `rva` and `section` for PE
+input, so a hit feeds `func-bounds` / `xrefs-rva` without manual conversion. Offsets inside the
+headers map to themselves and are labelled `(headers)`.
+
 ### xrefs_to_rva — cross-references to an RVA
+
 
 ```python
 refs = xrefs_to_rva(
