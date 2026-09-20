@@ -28,7 +28,8 @@ from pathlib import Path
 
 import pytest
 
-from .synthetic_pe import TARGET_RVA, TEXT_RVA, TEXT_VSIZE, write_synthetic_pe
+from .synthetic_pe import MARKER_TEXT, TARGET_RVA, TEXT_RVA, TEXT_VSIZE, write_synthetic_pe
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS = [
@@ -276,7 +277,7 @@ def pe_path(tmp_path_factory) -> str:
 
 
 def _actual_keys(name: str, path: str) -> set[str]:
-    from fridapilot.tools import pe_rva
+    from fridapilot.tools import binary_analysis, pe_metadata, pe_rva
 
     end = TEXT_RVA + TEXT_VSIZE
     calls = {
@@ -288,6 +289,12 @@ def _actual_keys(name: str, path: str) -> set[str]:
         "disassemble_rva": lambda: pe_rva.disassemble_rva(path, TEXT_RVA, 1),
         "map_refs_to_functions": lambda: pe_rva.map_refs_to_functions(
             path, {"g": TARGET_RVA}, TEXT_RVA, end),
+        "find_text": lambda: binary_analysis.find_text(
+            path, MARKER_TEXT, encodings=("ascii",))[0].model_dump(),
+        "find_strings": lambda: binary_analysis.find_strings(
+            path, min_len=8, encoding="ascii")[0].model_dump(),
+        "search_bytes": lambda: binary_analysis.search_bytes(path, "4d5a")[0].model_dump(),
+        "pe_metadata": lambda: pe_metadata.pe_metadata(path),
     }
     if name not in calls:
         pytest.fail(f"return-keys marker for unsupported function {name}")
@@ -295,6 +302,7 @@ def _actual_keys(name: str, path: str) -> set[str]:
     if result is None:
         pytest.skip(f"{name} produces no rows on the fixture")
     return set(result.keys())
+
 
 
 MARKERS = [(doc, name, keys)

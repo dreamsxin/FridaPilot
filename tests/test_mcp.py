@@ -148,7 +148,22 @@ def test_pe_rva_tools_round_trip(pe_path):
     assert isinstance(fields, list)
 
 
+def test_metadata_and_find_text_tools(pe_path):
+    meta = server._handle_tool("binary_metadata", {"binary_path": pe_path})
+    assert meta["machine"] == "0x8664"
+    assert [s["name"] for s in meta["sections"]] == [".text", ".rdata", ".pdata"]
+
+    from .synthetic_pe import GBK_RVA, GBK_TEXT
+
+    hits = server._handle_tool("binary_find_text", {
+        "binary_path": pe_path, "text": GBK_TEXT,
+        "encodings": ["ascii", "utf8", "utf16le", "gbk"]})
+    assert [h["rva"] for h in hits] == [GBK_RVA]
+    assert hits[0]["encoding"] == "gbk"
+
+
 def test_unpack_detect_runs_on_the_fixture(pe_path):
+
     info = server._handle_tool("unpack_detect", {"binary_path": pe_path})
     assert info["filepath"] == pe_path
     assert isinstance(info["packed"], bool)

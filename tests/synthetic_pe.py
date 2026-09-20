@@ -22,9 +22,14 @@ PDATA_RVA = 0x3000
 
 TARGET_RVA = RDATA_RVA           # the "global" that every reference resolves to
 PTR_RVA = RDATA_RVA + 0x10       # qword holding IMAGE_BASE + TARGET_RVA
+MARKER_RVA = RDATA_RVA + 0x20    # ASCII marker string, for the string/byte search tests
+MARKER_TEXT = "FridaPilotMarker"
+GBK_RVA = RDATA_RVA + 0x40       # the same idea in CP936, invisible to an ASCII scan
+GBK_TEXT = "\u914d\u7f6e\u5df2\u52a0\u8f7d"
 CALL_TARGET_RVA = TEXT_RVA + 0x200
 LEAF_RVA = TEXT_RVA + 0x300      # deliberately outside every .pdata entry
 UNWIND_RVA = 0x4000
+
 
 # (label, bytes before disp32, bytes after disp32). Each entry is a real encoding
 # of a rip-relative access; the ones with a prefix ahead of the opcode are
@@ -86,6 +91,11 @@ def _build_image(func_end_rva: int, text: bytes) -> bytes:
     rdata = bytearray(0x200)
     rdata[0] = 0x01                                             # the target byte
     rdata[0x10:0x18] = struct.pack("<Q", IMAGE_BASE + TARGET_RVA)
+    marker = MARKER_TEXT.encode("ascii")
+    rdata[0x20:0x20 + len(marker)] = marker
+    gbk = GBK_TEXT.encode("gbk")
+    rdata[0x40:0x40 + len(gbk)] = gbk
+
 
     # .pdata: two RUNTIME_FUNCTIONs, VirtualSize = 24. The raw section is padded
     # to FileAlignment with 0xAA so that a parser walking SizeOfRawData (instead
