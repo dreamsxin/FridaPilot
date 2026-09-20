@@ -690,8 +690,9 @@ def map_refs_to_functions(
     return {
         "functions": out_funcs,
         "orphans": orphans,
-        "unreferenced": sorted(l for r, ls in by_rva.items() if r not in referenced
-                               for l in ls),
+        "unreferenced": sorted(name for rva, names in by_rva.items()
+                               if rva not in referenced for name in names),
+
         "scanned_bytes": n,
     }
 

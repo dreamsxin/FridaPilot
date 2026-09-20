@@ -363,10 +363,8 @@ def _parse_dex_header(data: bytes, filepath: str = "") -> tuple[DEXAnalysis, lis
     string_ids_off = struct.unpack_from("<I", data, 60)[0]
     result.string_count = string_ids_size
 
-    # Type IDs
-    type_ids_size = struct.unpack_from("<I", data, 64)[0]
-
     # Method IDs
+
     method_ids_size = struct.unpack_from("<I", data, 88)[0]
     result.method_count = method_ids_size
 
