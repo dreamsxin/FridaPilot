@@ -158,6 +158,20 @@ If a signature changes, fix the docs in the same commit — the test will point 
   and refuses queries outside its recorded coverage, which is the only reason it is safe: a cache
   that answers beyond what it scanned reproduces the partial-scan false negative.
 
+- **"Who calls this function" is the wrong question for most C++ callees.** A virtual method, a
+  Blink IDL / V8 binding-table entry, an import thunk and a stored callback are all reached
+  through a pointer, so no `call`/`jmp` instruction anywhere in the image names them. Scanning a
+  code section for direct branches returns 0 for a hot function exactly as it does for dead code.
+  `pe_rva.function_xrefs` sweeps every executable section for branches *and* every data section
+  for pointer slots, and returns a `verdict` sentence rather than a bare count. Do not conclude
+  "unreferenced" from a call/jmp scan. *(enforced:
+  `tests/test_pe_rva.py::test_call_jmp_scan_cannot_see_an_indirect_only_callee`)*
+- **Absolute-pattern kinds must not use a per-byte loop.** `ptr`, `rva32` and `imm64` search for
+  one fixed byte string, so they go through `bytes.find`; the old `struct.unpack_from` walk cost
+  ≈0.3 s/MB (32 MB: ≈10 s vs 0.16 s), which is why a pointer-table sweep of a Chromium-sized data
+  section felt unaffordable and got skipped — the direct cause of an indirect-only callee reading
+  as unreferenced. `call`/`jmp` are rel32/rel8 and stay in the byte walk, which is now skipped
+  entirely when no relative kind is requested.
 - **Inline-constructed strings defeat every contiguous search.** A string the compiler builds in
   registers (`movabs rax, imm64` plus a narrower store for the tail) has no `.rdata` copy, and its
   characters are separated by the opcode bytes carrying them — so `find_string_rvas`, `find_text`

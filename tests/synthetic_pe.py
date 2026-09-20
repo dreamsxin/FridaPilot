@@ -30,6 +30,9 @@ CALL_TARGET_RVA = TEXT_RVA + 0x200
 LEAF_RVA = TEXT_RVA + 0x300      # deliberately outside every .pdata entry
 INLINE_RVA = TEXT_RVA + 0x340    # string built in registers; no .rdata copy exists
 INLINE_TEXT = "AudioBuffer"      # 11 bytes -> movabs imm64 + mov imm32, never contiguous
+INDIRECT_FN_RVA = TEXT_RVA + 0x380   # function nothing ever call/jmps to directly
+VTABLE_SLOT_RVA = RDATA_RVA + 0x80   # ...its address lives here instead
+DISPATCH_RVA = TEXT_RVA + 0x3A0      # ...and this is the code that loads the slot
 UNWIND_RVA = 0x4000
 
 
@@ -97,6 +100,19 @@ def _build_text() -> tuple[bytearray, dict[str, int], int]:
               + b"\xB8" + raw[8:] + b"\x00")  # mov eax, imm32    -> "fer\0"
     text[INLINE_RVA - TEXT_RVA:INLINE_RVA - TEXT_RVA + len(inline)] = inline
 
+    # An indirectly-dispatched callee. Its body is in .text and it has a .pdata entry,
+    # but NOTHING in the image call/jmps to it — the only occurrence of its address is
+    # the qword written at VTABLE_SLOT_RVA in .rdata, which the indirect call below
+    # loads. This is the shape of a C++ virtual method, a Blink IDL binding-table
+    # entry, or an import thunk, and it is why "who calls this function" returns 0.
+    placed["indirect callee"] = INDIRECT_FN_RVA
+    body = INDIRECT_FN_RVA - TEXT_RVA
+    text[body:body + 4] = b"\x33\xC0\xC3\x90"          # xor eax, eax; ret; nop
+
+    placed["call qword [rip+d]"] = DISPATCH_RVA
+    dispatch = _rip_bytes(DISPATCH_RVA, b"\xFF\x15", b"", VTABLE_SLOT_RVA)
+    text[DISPATCH_RVA - TEXT_RVA:DISPATCH_RVA - TEXT_RVA + len(dispatch)] = dispatch
+
     return text, placed, func_end
 
 
@@ -108,6 +124,8 @@ def _build_image(func_end_rva: int, text: bytes) -> bytes:
     rdata[0x20:0x20 + len(marker)] = marker
     gbk = GBK_TEXT.encode("gbk")
     rdata[0x40:0x40 + len(gbk)] = gbk
+    # the "vtable slot": the indirect callee's VA, its only appearance in the image
+    rdata[0x80:0x88] = struct.pack("<Q", IMAGE_BASE + INDIRECT_FN_RVA)
 
 
     # .pdata: two RUNTIME_FUNCTIONs, VirtualSize = 24. The raw section is padded

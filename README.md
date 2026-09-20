@@ -120,6 +120,7 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp binary index-info [file]` | 查看索引覆盖范围 / 列出全部索引 | ❌ |
 | `fp binary index-drop <file>` | 删除该文件内容对应的索引 | ❌ |
 | `fp binary xrefs-rva <file>` | RVA-aware 交叉引用（rip 数据引用 + CALL/JMP）。范围默认整节（`--section`），并打印实际扫描覆盖率 | ❌ |
+| `fp binary callers <file> --target <rva>` | **函数的调用方**：所有可执行节扫 call/jmp + 所有数据节扫指针槽位，给出结论句（虚函数/IDL 绑定表/thunk 没有直接 call，用这个而不是 `xrefs-rva --kinds call,jmp`） | ❌ |
 
 
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
@@ -272,7 +273,24 @@ fp binary search-bytes target.dll "48 8b ?? 48 89"
 - `find-text`：不知道编码时用，多编码同时搜
 - `search-bytes`：搜常量/magic/字节模式
 
-**Step 2 — 交叉引用（一次扫描，检查覆盖率）**
+**Step 2 — 交叉引用（先判断目标是什么）**
+
+目标是**函数** → 用 `fp binary callers`，不要用 `xrefs-rva --kinds call,jmp`：
+
+```bash
+fp binary callers target.dll --target 0x0B029CC0
+fp binary callers target.dll --target 0x0B029CC0 --follow
+```
+
+C++ 虚函数、Blink IDL 方法（如 `HTMLCanvasElement::toDataURL`，由 V8 绑定层从生成的方法表里调）、导入 thunk、回调——这些被调用者在整个镜像里**没有任何直接 call/jmp 指令**，它们的地址只以一个 8 字节指针的形式存在于数据节。所以「谁 call 这个函数」对它们必然返回 0，热函数和死代码的输出完全一样。
+
+`callers` 同时扫描所有可执行节（call/jmp）和所有数据节（ptr），并给出结论句：
+
+- `N direct call/jmp site(s)` — 普通函数
+- `no direct call/jmp, but the address appears in N data-section slot(s)` — 间接分发，加 `--follow` 找出装载该槽位的代码，那才是真正的调用方
+- `no reference of any kind, over every code and data section` — 只有这一句才支持「未被引用」的结论
+
+目标是**数据** → `xrefs-rva`：
 
 ```bash
 fp binary xrefs-rva target.dll --target 0x1234abcd
@@ -280,11 +298,13 @@ fp binary xrefs-rva target.dll --target 0x1234abcd --section .rdata --kinds ptr
 fp binary map-refs target.dll --strings "key_a,key_b,key_c"
 ```
 
-- 范围默认整个 `.text` 节，**不要手动缩小范围**（已导致 240 MB `.text` 上的假阴性）
+- 范围默认整个 `.text` 节，**不要手动缩小范围**（已两次导致假阴性：240 MB `.text` 上覆盖率 21.8% 和 16.3%，都被读成「没有引用」）
 - 检查打印的覆盖率百分比：低于 100% 说明扫描不完整
 - `rip` 找不到时试 `--section .rdata --kinds ptr`（表指针）
 - 多目标用 `map-refs` 一次扫描，不要循环调用 `xrefs-rva`
 - 仍找不到 → 字符串可能是 `movabs` 内联构造（寄存器拼装），用 `fp binary inline-strings`。**不要用 `find-text`**：字符被携带它们的指令操作码切断，任何连续字节搜索都找不到
+
+`xrefs-rva` 现在也不会对这件事保持沉默：对可执行节里的地址得到 0 命中时，它会打印间接分发的解释和应该改跑的 `callers` 命令。
 
 **Step 2b — 内联构造字符串（其他工具的结构性盲区）**
 
@@ -554,6 +574,7 @@ binary_inline_strings     # 定位 movabs 内联构造的字符串（连续搜�
 
 
 binary_xrefs_rva          # RVA 交叉引用（rip 数据引用 + call/jmp，支持 pdata_only）
+binary_callers            # 函数调用方：code 节 call/jmp + data 节指针槽位，附结论句
 binary_func_bounds        # 从 .pdata 取函数边界
 binary_disasm_rva         # RVA-aware 反汇编（rip/call 目标标注）
 binary_field_refs         # 结构体字段 [reg+offset] 读写定位

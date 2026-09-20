@@ -94,6 +94,7 @@ def _register_tools() -> None:
         "pe_rva.find_inline_strings": pe_rva.find_inline_strings,
 
         "pe_rva.xrefs_to_rva": pe_rva.xrefs_to_rva,
+        "pe_rva.function_xrefs": pe_rva.function_xrefs,
         "pe_rva.field_refs": pe_rva.field_refs,
         "pe_rva.map_refs_to_functions": pe_rva.map_refs_to_functions,
         "pe_rva.disassemble_rva": pe_rva.disassemble_rva,

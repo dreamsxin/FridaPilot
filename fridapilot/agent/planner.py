@@ -214,6 +214,13 @@ When target is an iOS/macOS app, follow this specialized pipeline:
   produced a false negative on a 240 MB .text. For N targets use map_refs_to_functions, which
   scans once and reports section_coverage
 
+- pe_rva.function_xrefs(path, target_rva, follow) -> Who reaches a FUNCTION. Use this instead
+  of xrefs_to_rva(kinds=("call","jmp")) for any code target. It scans every code section for
+  direct branches AND every data section for pointer-table entries, then returns a verdict
+  sentence. Virtual methods, Blink IDL / V8 binding methods, import thunks and callbacks have
+  no direct branch anywhere in the image - their address exists only as an 8-byte pointer in a
+  data section - so "who calls it" returns 0 whether the function is hot or dead. follow=True
+  adds one scan that finds the instructions loading those slots, i.e. the real dispatch sites
 - pe_rva.field_refs(path, offset, kind, start, end) -> Find struct field read/write at a given offset (e.g., offset=0xB0)
 - pe_rva.map_refs_to_functions(path, strings, start, end) -> Map multiple strings to their consuming functions in one pass
 - rip_index.build_rip_index(path, section) -> Scan the section ONCE and persist every rip
@@ -276,12 +283,17 @@ Step 1 — Anchor location. find_string_rvas (known encoding) / find_text (unkno
 searches many codecs) / search_bytes (constants, magic). All return RVA + section, feeding
 step 2 directly.
 
-Step 2 — Cross-references. xrefs_to_rva defaults to the whole section — NEVER hand-pick a
-sub-range unless deliberate. A partial scan returning nothing is indistinguishable from "no
-references" (real bug: 240 MB .text, 21.8% scanned, reported 0 refs). Always check the
-printed coverage. Empty rip ≠ no references: try section=".rdata" kinds=("ptr",) for table
-pointers, then find_inline_strings for strings the code builds in registers. For N targets use
-map_refs_to_functions (one scan instead of N).
+Step 2 — Cross-references. FIRST decide what the target is. If it is a FUNCTION, use
+function_xrefs, not xrefs_to_rva(kinds=("call","jmp")): a callee reached only through a
+vtable / IDL binding table / import thunk has no direct branch anywhere, so "who calls it"
+returns 0 for a hot function exactly as it does for dead code (real case: a Blink IDL method
+at 0x0B029CC0 — the V8 bindings dispatch it from a generated table, .text contains no call).
+For DATA, xrefs_to_rva defaults to the whole section — NEVER hand-pick a sub-range unless
+deliberate. A partial scan returning nothing is indistinguishable from "no references" (real
+bug: 240 MB .text, 21.8% scanned, reported 0 refs; another run scanned 16.3% of the range).
+Always check the printed coverage. Empty rip ≠ no references: try section=".rdata"
+kinds=("ptr",) for table pointers, then find_inline_strings for strings the code builds in
+registers. For N targets use map_refs_to_functions (one scan instead of N).
 
 Step 2b — Inline strings. If the string has no .rdata copy at all, or has one that nothing
 references, the code may construct it from immediates. Use find_inline_strings: a contiguous

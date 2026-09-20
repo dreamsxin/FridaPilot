@@ -929,10 +929,102 @@ def xrefs_rva_cmd(
         console.print(f"  RVA 0x{x['from_rva']:08x}  [{x['kind']:<5s}]  "
                       f"{x['mnemonic']} {escape(x['op_str'])}")
     if not results and "ptr" not in kind_tuple:
-        console.print("[dim]  Tip: 0 hits for a string that is clearly used? It may be "
-                      "in a const char* table — retry with --section .rdata --kinds ptr, "
-                      "or the string may be built inline with movabs immediates "
-                      "(use find-text / search-bytes instead).[/dim]")
+        from fridapilot.tools.pe_rva import PEImage
+        img = PEImage(binary)
+        tgt = int(target, 0)
+        if img.is_executable(img.section_of(tgt) or ""):
+            console.print("[yellow]  0 hits on a CODE address.[/yellow] A function that is only "
+                          "dispatched indirectly (C++ virtual, Blink IDL binding table, import "
+                          "thunk) is never the operand of a call/jmp — its address sits in a "
+                          "data-section pointer table.")
+            console.print(f"[dim]  Run: fp binary callers {binary} --target 0x{tgt:x}[/dim]")
+        else:
+            console.print("[dim]  Tip: 0 hits for a string that is clearly used? It may be "
+                          "in a const char* table — retry with --section .rdata --kinds ptr, "
+                          "or the string may be built inline with movabs immediates "
+                          "(use inline-strings instead).[/dim]")
+
+
+@binary_app.command("callers")
+def callers_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file."),
+    target: str = typer.Option(..., "--target", "-t", help="RVA of the function."),
+    follow: bool = typer.Option(
+        False, "--follow",
+        help="Also find the instructions that load the pointer slots (the dispatch "
+             "sites). One extra scan of the code sections, regardless of slot count.",
+    ),
+    no_verify: bool = typer.Option(False, "--no-verify", help="Skip capstone verification."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Who reaches this function — direct call/jmp AND pointer-table entries.
+
+    `xrefs-rva --kinds call,jmp` only answers "who branches straight to this address".
+    Virtual methods, Blink IDL methods, import thunks and callbacks have no such
+    instruction anywhere: the only occurrence of their address is an 8-byte pointer in
+    a data section. Asking "who calls it" then returns 0 whether the function is hot
+    or dead. This command scans every code section for branches and every data section
+    for pointers, and states which case it found.
+
+    Examples:
+      fp binary callers chrome.dll --target 0xb029cc0
+      fp binary callers chrome.dll --target 0xb029cc0 --follow --json
+    """
+    from fridapilot.tools.pe_rva import function_xrefs
+
+    filepath = Path(binary)
+    if not filepath.exists():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+    res = function_xrefs(binary, int(target, 0), follow=follow, verify=not no_verify)
+
+    if json_output:
+        _emit_json(res)
+        return
+
+    console.print(f"[bold]Callers of 0x{res['target_rva']:x}[/bold] "
+                  f"({res['target_section'] or 'unmapped'}, "
+                  f"{'code' if res['target_is_code'] else 'data'})")
+    console.print(f"[dim]swept {len(res['scanned'])} section(s): "
+                  + ", ".join(f"{s['section']}[{s['kinds']}]" for s in res["scanned"])
+                  + "[/dim]")
+
+    if res["direct"]:
+        table = Table(title=f"Direct branches ({len(res['direct'])})")
+        table.add_column("RVA", style="cyan")
+        table.add_column("Kind")
+        table.add_column("Section")
+        table.add_column("In function", style="dim")
+        for r in res["direct"]:
+            fn = f"0x{r['func_begin_rva']:x}" if r.get("func_begin_rva") is not None else "-"
+            table.add_row(f"0x{r['from_rva']:08x}", r["kind"], r["section"], fn)
+        console.print(table)
+
+    if res["indirect"]:
+        table = Table(title=f"Pointer-table slots ({len(res['indirect'])})")
+        table.add_column("Slot RVA", style="cyan")
+        table.add_column("Section")
+        for r in res["indirect"]:
+            table.add_row(f"0x{r['from_rva']:08x}", r["section"])
+        console.print(table)
+
+    if res["dispatchers"]:
+        table = Table(title=f"Dispatch sites ({len(res['dispatchers'])})")
+        table.add_column("RVA", style="cyan")
+        table.add_column("Loads slot")
+        table.add_column("Instruction", style="green")
+        table.add_column("In function", style="dim")
+        for d in res["dispatchers"]:
+            fn = f"0x{d['func_begin_rva']:x}" if d.get("func_begin_rva") is not None else "-"
+            table.add_row(f"0x{d['from_rva']:08x}", f"0x{d['slot_rva']:x}",
+                          f"{d['mnemonic']} {escape(d['op_str'])}", fn)
+        console.print(table)
+
+    style = "green" if (res["direct"] or res["indirect"]) else "yellow"
+    console.print(f"[{style}]{res['verdict']}[/{style}]")
+    if res["indirect"] and not follow:
+        console.print("[dim]  Add --follow to find the code that loads those slots.[/dim]")
 
 
 

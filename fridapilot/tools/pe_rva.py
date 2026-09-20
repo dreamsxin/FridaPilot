@@ -45,12 +45,15 @@ class PEImage:
         self.is_64bit = self._pe.FILE_HEADER.Machine == 0x8664
         self._pdata: list[tuple[int, int, int]] | None = None
         self._sections: list[tuple[int, int, int, int, str]] = []
+        self._section_flags: dict[str, int] = {}
         for s in self._pe.sections:
+            name = s.Name.rstrip(b"\x00").decode("latin1")
             self._sections.append((
                 s.VirtualAddress, s.Misc_VirtualSize,
                 s.PointerToRawData, s.SizeOfRawData,
-                s.Name.rstrip(b"\x00").decode("latin1"),
+                name,
             ))
+            self._section_flags[name] = s.Characteristics
         with open(self.path, "rb") as f:
             self._data = f.read()
 
@@ -152,6 +155,47 @@ class PEImage:
             if sec == name:
                 return va, va + max(vs, rsize)
         return None
+
+    def is_executable(self, name: str) -> bool:
+        """IMAGE_SCN_MEM_EXECUTE — tells code sections from data sections by flag."""
+        return bool(self._section_flags.get(name, 0) & 0x20000000)
+
+    def code_sections(self) -> list[tuple[str, int, int]]:
+        """[(name, start_rva, end_rva)] for every executable section.
+
+        Names are not reliable: a build can put code in a section that is not called
+        ``.text`` (and packers routinely do), so the executable flag decides.
+        """
+        return [(sec, va, va + max(vs, rsize))
+                for va, vs, _p, rsize, sec in self._sections
+                if self.is_executable(sec)]
+
+    def data_sections(self) -> list[tuple[str, int, int]]:
+        """[(name, start_rva, end_rva)] for every non-executable section with content.
+
+        These are where function pointers live: vtables, IDL/binding method tables,
+        import thunk tables, jump tables. A callee that is only ever dispatched
+        indirectly has its address *here* and nowhere in the code sections.
+        """
+        return [(sec, va, va + max(vs, rsize))
+                for va, vs, _p, rsize, sec in self._sections
+                if not self.is_executable(sec) and max(vs, rsize) > 0]
+
+
+def _find_all(data: bytes, pattern: bytes, start: int = 0):
+    """Yield every offset of ``pattern`` in ``data`` (overlapping allowed).
+
+    ``bytes.find`` runs in C. The equivalent per-byte Python loop with
+    ``struct.unpack_from`` costs ≈0.3 s/MB, so a pointer-table sweep of a
+    Chromium-sized data section took minutes and was therefore skipped — which is
+    precisely how an indirectly-dispatched callee ends up reported as unreferenced.
+    Measured on a 32 MB buffer: 0.16 s here vs ≈10 s for the loop.
+    """
+    pos = data.find(pattern, start)
+    while pos >= 0:
+        yield pos
+        pos = data.find(pattern, pos + 1)
+
 
 
 
@@ -805,6 +849,7 @@ def xrefs_to_rva(
     scan_gaps: bool = True,
     section: str = "",
     use_index: bool = True,
+    diagnose: bool = True,
 ) -> list[dict[str, Any]]:
 
 
@@ -906,34 +951,44 @@ def xrefs_to_rva(
                 _emit(from_rva, "rip", mnem, op_str, size)
 
 
-    # ── absolute encodings: fixed-shape byte scans ──
-    for i in range(n - 9):
-        b0 = data[i]
-
-        # ── direct call / jmp rel32 ──
-        if (b0 == 0xE8 and "call" in want) or (b0 == 0xE9 and "jmp" in want):
-            rel = struct.unpack_from("<i", data, i + 1)[0]
-            if scan_start_rva + i + 5 + rel == target_rva:
-                kind = "call" if b0 == 0xE8 else "jmp"
-                _emit(scan_start_rva + i, kind, kind, "0x%x" % target_va)
-
-
-        # ── short jmp rel8 ──
-        if b0 == 0xEB and "jmp" in want:
-            rel = struct.unpack_from("<b", data, i + 1)[0]
-            if scan_start_rva + i + 2 + rel == target_rva:
-                _emit(scan_start_rva + i, "jmp", "jmp", "0x%x" % target_va)
-
-        # ── mov r64, imm64 ──
-        if "imm64" in want and (b0 in (0x48, 0x49)) and 0xB8 <= data[i + 1] <= 0xBF:
-            if struct.unpack_from("<Q", data, i + 2)[0] == target_va:
-                _emit(scan_start_rva + i, "imm64", "movabs", "0x%x" % target_va)
-
-        # ── raw pointers ──
-        if "ptr" in want and struct.unpack_from("<Q", data, i)[0] == target_va:
+    # ── absolute encodings: whole-pattern searches ──
+    #
+    # ptr / rva32 / imm64 all look for one FIXED byte string (the target VA or RVA),
+    # so bytes.find does the work in C. This used to share the per-byte walk below at
+    # ≈0.3 s/MB, which made a pointer-table sweep of a Chromium-sized data section a
+    # minutes-long job — so it got skipped, and an indirectly-dispatched callee read
+    # as "no references". 32 MB: 0.16 s here vs ≈10 s in the loop.
+    if "ptr" in want:
+        for i in _find_all(data, struct.pack("<Q", target_va)):
             _emit(scan_start_rva + i, "ptr", "(data)", "qword 0x%x" % target_va)
-        if "rva32" in want and struct.unpack_from("<I", data, i)[0] == target_rva:
+    if "rva32" in want:
+        for i in _find_all(data, struct.pack("<I", target_rva)):
             _emit(scan_start_rva + i, "rva32", "(data)", "dword 0x%x" % target_rva)
+    if "imm64" in want:
+        for i in _find_all(data, struct.pack("<Q", target_va)):
+            # MOV r64, imm64 is REX.W + B8+r, so the immediate starts two bytes in.
+            if i >= 2 and data[i - 2] in (0x48, 0x49) and 0xB8 <= data[i - 1] <= 0xBF:
+                _emit(scan_start_rva + i - 2, "imm64", "movabs", "0x%x" % target_va)
+
+    # call / jmp are rel32 / rel8: the encoded bytes depend on the address of the
+    # instruction itself, so there is no fixed pattern to search for and the byte walk
+    # stays. Skipped entirely when only absolute kinds were asked for.
+    if want & {"call", "jmp"}:
+        for i in range(n - 9):
+            b0 = data[i]
+
+            # ── direct call / jmp rel32 ──
+            if (b0 == 0xE8 and "call" in want) or (b0 == 0xE9 and "jmp" in want):
+                rel = struct.unpack_from("<i", data, i + 1)[0]
+                if scan_start_rva + i + 5 + rel == target_rva:
+                    kind = "call" if b0 == 0xE8 else "jmp"
+                    _emit(scan_start_rva + i, kind, kind, "0x%x" % target_va)
+
+            # ── short jmp rel8 ──
+            if b0 == 0xEB and "jmp" in want:
+                rel = struct.unpack_from("<b", data, i + 1)[0]
+                if scan_start_rva + i + 2 + rel == target_rva:
+                    _emit(scan_start_rva + i, "jmp", "jmp", "0x%x" % target_va)
 
     out.sort(key=lambda r: r["from_rva"])
 
@@ -952,7 +1007,143 @@ def xrefs_to_rva(
         if rec.get("size"):
             covered_until = rec["from_rva"] + rec["size"]
 
+    # An empty result is the dangerous one: it reads as "nothing references this"
+    # whatever the actual reason. Say which reason applies before the caller guesses.
+    if not deduped and diagnose \
+            and img.is_executable(img.section_of(target_rva) or "") \
+            and not (want & {"ptr", "rva32"}):
+        logger.warning(
+            "no %s reference to code at 0x%x. A function that is only dispatched "
+            "indirectly (C++ virtual, Blink IDL binding table, import thunk) is never "
+            "the operand of a call/jmp — its address sits in a data-section pointer "
+            "table instead. Use function_xrefs(), which scans both, before concluding "
+            "it is unreferenced",
+            "/".join(sorted(want)), target_rva)
+
     return deduped
+
+
+def function_xrefs(
+    binary_path: str | Path,
+    target_rva: int,
+    follow: bool = False,
+    verify: bool = True,
+    use_index: bool = True,
+) -> dict[str, Any]:
+    """Who reaches this function — direct calls *and* pointer-table entries.
+
+    ``xrefs_to_rva(..., kinds=("call","jmp"))`` answers "who has a direct branch to
+    this address". For a large class of real callees that question has no instances
+    and the empty answer means nothing:
+
+    * C++ virtual methods are dispatched through a vtable;
+    * Blink IDL methods (``HTMLCanvasElement::toDataURL`` and every other bound Web
+      API) are invoked by the V8 binding layer out of a generated method table;
+    * imported functions go through a thunk table;
+    * callbacks are passed as addresses and called later.
+
+    In all of those the only occurrence of the function's address in the image is an
+    8-byte pointer sitting in a *data* section — a place the default ``.text`` scan
+    never looks. Asking "who calls it" and getting 0 is then guaranteed, and is
+    indistinguishable from the function being dead.
+
+    So scan both: ``call``/``jmp`` over every executable section, ``ptr``/``rva32``
+    over every data section, and report each with the coverage it achieved. The
+    pointer sweep is a ``bytes.find`` pass, so adding it costs almost nothing.
+
+    Args:
+        follow: after finding pointer slots, run one rip scan over the code sections
+            to find the instructions that load those slots — the actual dispatch
+            sites. One pass regardless of slot count; skip it to stay cheap.
+
+    Returns:
+        {target_rva, target_section, target_is_code, direct, indirect, dispatchers,
+         scanned, verdict}. ``verdict`` is a sentence, because the number that needs
+        interpreting most often is zero.
+    """
+    img = PEImage(binary_path)
+    target_section = img.section_of(target_rva) or ""
+    target_is_code = img.is_executable(target_section)
+
+    scanned: list[dict[str, Any]] = []
+    direct: list[dict[str, Any]] = []
+    indirect: list[dict[str, Any]] = []
+
+    for name, lo, hi in img.code_sections():
+        scanned.append({"section": name, "start_rva": lo, "end_rva": hi, "kinds": "call,jmp"})
+        for rec in xrefs_to_rva(binary_path, target_rva, lo, hi,
+                                kinds=("call", "jmp"), verify=verify,
+                                use_index=use_index, diagnose=False):
+            func = img.function_at(rec["from_rva"])
+            rec["section"] = name
+            rec["func_begin_rva"] = func[0] if func else None
+            direct.append(rec)
+
+    for name, lo, hi in img.data_sections():
+        scanned.append({"section": name, "start_rva": lo, "end_rva": hi, "kinds": "ptr,rva32"})
+        for rec in xrefs_to_rva(binary_path, target_rva, lo, hi,
+                                kinds=("ptr",), verify=False, use_index=False):
+            rec["section"] = name
+            indirect.append(rec)
+
+    # Second hop: the slot addresses are what the dispatching code actually loads.
+    dispatchers: list[dict[str, Any]] = []
+    if follow and indirect:
+        import capstone
+
+        slots = {r["from_rva"] for r in indirect}
+        md = capstone.Cs(capstone.CS_ARCH_X86,
+                         capstone.CS_MODE_64 if img.is_64bit else capstone.CS_MODE_32)
+        md.detail = True
+        for name, lo, hi in img.code_sections():
+            blob = img.read_rva(lo, hi - lo)
+            if blob is None:
+                continue
+            for from_rva, slot, mnem, op_str, size in _iter_rip_refs(
+                    img, md, blob, lo, hi, lambda t: t in slots,
+                    verify=verify, scan_gaps=True):
+                func = img.function_at(from_rva)
+                dispatchers.append({
+                    "from_rva": from_rva, "slot_rva": slot, "mnemonic": mnem,
+                    "op_str": op_str, "size": size, "section": name,
+                    "func_begin_rva": func[0] if func else None,
+                })
+
+    if not target_is_code:
+        verdict = (f"0x{target_rva:x} is in {target_section or '(unmapped)'}, which is not "
+                   "executable — this is data, not a function. Use xrefs_to_rva with "
+                   "kinds=('rip','ptr') instead")
+    elif direct:
+        verdict = (f"{len(direct)} direct call/jmp site(s)"
+                   + (f", plus {len(indirect)} pointer-table slot(s)" if indirect else ""))
+    elif indirect:
+        verdict = (f"no direct call/jmp, but the address appears in {len(indirect)} "
+                   "data-section slot(s): this function is dispatched indirectly "
+                   "(vtable / binding table / thunk)")
+        if dispatchers:
+            verdict += (f"; {len(dispatchers)} dispatch site(s) load those slots — "
+                        "those are the callers")
+        elif follow:
+            verdict += ("; no instruction loads those slots directly, so the table base is "
+                        "indexed at runtime — disassemble the table's own references instead")
+        else:
+            verdict += ". The callers load the slot — re-run with follow=True to find them"
+    else:
+        verdict = ("no reference of any kind, over every code and data section in the "
+                   "image. Remaining possibilities: the address is computed at runtime "
+                   "(relocation, +offset arithmetic), it is an exported entry point "
+                   "reached from outside this module, or the RVA is wrong")
+
+    return {
+        "target_rva": target_rva,
+        "target_section": target_section,
+        "target_is_code": target_is_code,
+        "direct": direct,
+        "indirect": indirect,
+        "dispatchers": dispatchers,
+        "scanned": scanned,
+        "verdict": verdict,
+    }
 
 
 # ── inline (immediate-encoded) strings ──────────────────────────────────────

@@ -437,6 +437,23 @@ def binary_inline_strings(
 
 
 @mcp.tool()
+def binary_callers(
+    binary_path: str, target_rva: int, follow: bool = False,
+) -> dict[str, Any]:
+    """Who reaches a function: direct call/jmp over every code section AND pointer-table
+    entries over every data section, in one call. Use this instead of binary_xrefs_rva with
+    kinds=call,jmp whenever the target is a function. Virtual methods, Blink IDL / V8 binding
+    methods, import thunks and callbacks are never the operand of a direct branch — their
+    address only exists as an 8-byte pointer in a data section, so "who calls it" returns 0
+    whether the function is hot or dead. Returns direct[], indirect[] (slots), dispatchers[]
+    (with follow=true: the instructions loading those slots), scanned[] coverage, and a plain
+    verdict sentence that distinguishes "indirectly dispatched" from "unreferenced"."""
+    return _dispatch("binary_callers", {
+        "binary_path": binary_path, "target_rva": target_rva, "follow": follow,
+    })
+
+
+@mcp.tool()
 def binary_index_build(
     binary_path: str, section: str = ".text", target_sections: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1023,6 +1040,11 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
             section=arguments.get("section", ".text"),
             window=int(arguments.get("window", 96)),
             limit=int(arguments.get("limit", 100)))
+
+    if name == "binary_callers":
+        from fridapilot.tools.pe_rva import function_xrefs
+        return function_xrefs(arguments["binary_path"], int(arguments["target_rva"]),
+                              follow=bool(arguments.get("follow", False)))
 
     if name == "binary_index_build":
         from fridapilot.tools.rip_index import build_rip_index

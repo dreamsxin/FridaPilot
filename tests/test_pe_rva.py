@@ -19,6 +19,8 @@ currently prints:
 
 from __future__ import annotations
 
+import logging
+import struct
 import sys
 
 import pytest
@@ -28,6 +30,7 @@ from fridapilot.tools.pe_rva import (
     find_inline_strings,
     find_string_rvas,
     function_bounds,
+    function_xrefs,
     map_refs_to_functions,
     section_range,
     xrefs_to_rva,
@@ -36,7 +39,9 @@ from fridapilot.tools.pe_rva import (
 
 from .synthetic_pe import (
     CALL_TARGET_RVA,
+    DISPATCH_RVA,
     IMAGE_BASE,
+    INDIRECT_FN_RVA,
     INLINE_RVA,
     INLINE_TEXT,
     PTR_RVA,
@@ -47,6 +52,7 @@ from .synthetic_pe import (
     TEXT_VSIZE,
     LEAF_RVA,
     UNWIND_RVA,
+    VTABLE_SLOT_RVA,
     write_synthetic_pe,
 )
 
@@ -366,4 +372,92 @@ def test_find_inline_strings_rejects_text_too_short_to_identify(fixture_pe):
     path, _placed, _end = fixture_pe
     with pytest.raises(ValueError, match="too short"):
         find_inline_strings(path, "abc")
+
+
+# ── indirectly dispatched functions ─────────────────────────────────────────
+#
+# The failure these pin: asking "who calls this function" about a callee that is only
+# ever reached through a pointer table returns 0, and 0 looks exactly like dead code.
+# Real case: HTMLCanvasElement::toDataURL is invoked by the V8 IDL binding layer out of
+# a generated method table, so .text contains no call to it at all.
+
+
+def test_call_jmp_scan_cannot_see_an_indirect_only_callee(fixture_pe):
+    """Scanning for direct branches is structurally incapable here — assert the 0."""
+    path, _placed, _end = fixture_pe
+
+    direct = xrefs_to_rva(path, INDIRECT_FN_RVA, kinds=("call", "jmp"), diagnose=False)
+    assert direct == [], "fixture must have no direct branch to the indirect callee"
+
+    # The address is not absent from the image, only from the code section.
+    slots = xrefs_to_rva(path, INDIRECT_FN_RVA, section=".rdata", kinds=("ptr",))
+    assert [s["from_rva"] for s in slots] == [VTABLE_SLOT_RVA]
+
+
+def test_empty_call_scan_on_a_code_target_explains_itself(fixture_pe, caplog):
+    """0 hits must not be silent: it has to name the indirect-dispatch possibility."""
+    path, _placed, _end = fixture_pe
+    with caplog.at_level(logging.WARNING, logger="fridapilot.tools.pe_rva"):
+        xrefs_to_rva(path, INDIRECT_FN_RVA, kinds=("call", "jmp"))
+    assert "dispatched" in caplog.text
+    assert "function_xrefs" in caplog.text
+
+
+def test_function_xrefs_finds_the_pointer_slot_and_says_so(fixture_pe):
+    path, _placed, _end = fixture_pe
+    res = function_xrefs(path, INDIRECT_FN_RVA)
+
+    assert res["target_is_code"] is True
+    assert res["direct"] == []
+    assert [r["from_rva"] for r in res["indirect"]] == [VTABLE_SLOT_RVA]
+    assert [r["section"] for r in res["indirect"]] == [".rdata"]
+    # The verdict is the deliverable: it must distinguish this from "unreferenced".
+    assert "dispatched indirectly" in res["verdict"]
+
+    # Both section classes were actually swept, so the answer is not range-limited.
+    swept = {s["section"] for s in res["scanned"]}
+    assert {".text", ".rdata"} <= swept
+
+
+def test_function_xrefs_follow_reaches_the_dispatch_site(fixture_pe):
+    """One more hop: who loads the slot. That is the real caller."""
+    path, _placed, _end = fixture_pe
+    res = function_xrefs(path, INDIRECT_FN_RVA, follow=True)
+
+    sites = {d["from_rva"] for d in res["dispatchers"]}
+    assert DISPATCH_RVA in sites, sorted(hex(s) for s in sites)
+    assert all(d["slot_rva"] == VTABLE_SLOT_RVA for d in res["dispatchers"])
+
+
+def test_function_xrefs_finds_direct_callers_too(fixture_pe):
+    """The normal case still works: CALL_TARGET_RVA is reached by a real E8."""
+    path, _placed, _end = fixture_pe
+    res = function_xrefs(path, CALL_TARGET_RVA)
+    assert res["direct"], "the fixture has a direct call to CALL_TARGET_RVA"
+    assert all(r["kind"] in ("call", "jmp") for r in res["direct"])
+    assert "direct call/jmp site" in res["verdict"]
+
+
+def test_function_xrefs_refuses_to_pretend_data_is_a_function(fixture_pe):
+    path, _placed, _end = fixture_pe
+    res = function_xrefs(path, TARGET_RVA)          # a .rdata byte, not code
+    assert res["target_is_code"] is False
+    assert "not executable" in res["verdict"]
+
+
+def test_absolute_kind_scan_agrees_with_the_byte_walk_it_replaced(fixture_pe):
+    """bytes.find must find exactly what the per-byte unpack loop found."""
+    path, _placed, _end = fixture_pe
+    img = PEImage(path)
+    lo, hi = img.section_range(".rdata")
+    blob = img.read_rva(lo, hi - lo)
+    needle = struct.pack("<Q", IMAGE_BASE + TARGET_RVA)
+
+    expected = {lo + i for i in range(len(blob) - 8)
+                if struct.unpack_from("<Q", blob, i)[0] == IMAGE_BASE + TARGET_RVA}
+    got = {r["from_rva"] for r in
+           xrefs_to_rva(path, TARGET_RVA, section=".rdata", kinds=("ptr",))}
+    assert got == expected
+    assert needle in blob and PTR_RVA in got
+
 

@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from .synthetic_pe import (
+    INDIRECT_FN_RVA,
     INLINE_TEXT,
     MARKER_TEXT,
     TARGET_RVA,
@@ -300,6 +301,7 @@ def _actual_keys(name: str, path: str) -> set[str]:
         "find_inline_strings": lambda: pe_rva.find_inline_strings(path, INLINE_TEXT)[0],
         "xrefs_to_rva": lambda: pe_rva.xrefs_to_rva(path, TARGET_RVA, TEXT_RVA, end,
                                                     kinds=("rip",))[0],
+        "function_xrefs": lambda: pe_rva.function_xrefs(path, INDIRECT_FN_RVA),
         "field_refs": lambda: None,
         "function_bounds": lambda: pe_rva.function_bounds(path, TEXT_RVA),
         "disassemble_rva": lambda: pe_rva.disassemble_rva(path, TEXT_RVA, 1),

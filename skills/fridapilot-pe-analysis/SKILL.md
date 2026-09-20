@@ -165,6 +165,51 @@ fp binary search-bytes app.exe "48 8b ?? 48 89" --limit 20
 input, so a hit feeds `func-bounds` / `xrefs-rva` without manual conversion. Offsets inside the
 headers map to themselves and are labelled `(headers)`.
 
+### function_xrefs — who reaches a function (direct *and* indirect)
+
+**For a code target, use this instead of `xrefs_to_rva(kinds=("call","jmp"))`.** "Who branches
+to this address" is the wrong question for a large class of real callees:
+
+- C++ virtual methods are dispatched through a vtable;
+- Blink IDL methods — `HTMLCanvasElement::toDataURL` and every other bound Web API — are invoked
+  by the V8 binding layer out of a generated method table;
+- imports go through a thunk table; callbacks are stored and called later.
+
+For all of those the only occurrence of the function's address in the image is an 8-byte pointer
+in a **data** section, which a `.text` scan never looks at. So the scan returns 0 — for a hot
+function exactly as it would for dead code.
+
+```python
+from fridapilot.tools.pe_rva import function_xrefs
+
+res = function_xrefs("chrome.dll", 0xb029cc0)
+res = function_xrefs("chrome.dll", 0xb029cc0, follow=True)   # + the dispatch sites
+```
+
+<!-- return-keys: function_xrefs = target_rva, target_section, target_is_code, direct, indirect, dispatchers, scanned, verdict -->
+Returns `target_rva`, `target_section`, `target_is_code`, `direct` (call/jmp sites), `indirect`
+(pointer slots), `dispatchers` (with `follow=True`: the instructions that load those slots),
+`scanned` (every section swept, with the kinds used), and `verdict`.
+
+Read `verdict` first — it is there because the number that needs interpreting is zero:
+
+- *"N direct call/jmp site(s)"* — ordinary function.
+- *"no direct call/jmp, but the address appears in N data-section slot(s)"* — indirectly
+  dispatched. `follow=True` then names the code that loads the slot, which is the real caller.
+- *"no reference of any kind, over every code and data section"* — only now is "unreferenced" a
+  defensible conclusion, and even then the address may be computed at runtime or be an exported
+  entry point.
+
+Both section classes are always swept whole, so this answer is never range-limited.
+
+```bash
+fp binary callers chrome.dll --target 0xb029cc0
+fp binary callers chrome.dll --target 0xb029cc0 --follow
+```
+
+`xrefs-rva` now also refuses to be silent about this: 0 hits on an address in an executable
+section prints the indirect-dispatch explanation and the `callers` command to run.
+
 ### xrefs_to_rva — cross-references to an RVA
 
 **The range defaults to the whole section. Do not hand-pick one unless you mean to.** A partial
@@ -442,7 +487,16 @@ directly into step 2.
 **Step 2 — Cross-references.** `xrefs-rva` defaults to scanning the whole section. Do NOT
 hand-pick a sub-range unless you genuinely intend a narrow search — a partial scan that returns
 nothing is indistinguishable from "this target has no references", and that exact mistake
-happened on a 240 MB `.text`. Always check the printed coverage percentage. If `rip` finds
+**Step 2 — Cross-references.** First decide *what the target is*. A **function** goes to
+`function_xrefs` / `fp binary callers`, never to `xrefs-rva --kinds call,jmp`: a callee reached
+only through a vtable, an IDL binding table or an import thunk has no direct branch anywhere in
+the image, so "who calls it" returns 0 for a hot function exactly as for dead code.
+
+For **data**, `xrefs-rva` defaults to scanning the whole section. Do NOT
+hand-pick a sub-range unless you genuinely intend a narrow search — a partial scan that returns
+nothing is indistinguishable from "this target has no references", and that exact mistake
+happened twice on a 240 MB `.text` (21.8% and 16.3% coverage, both read as "no references").
+Always check the printed coverage percentage. If `rip` finds
 nothing for a string that is obviously used, rescan `.rdata` with `kinds=("ptr",)` (Chromium
 collects `const char*` into arrays and only LEAs the array base). If that also finds nothing,
 the string may be built inline via `movabs` — use `find-inline-strings`, **not** `find-text`: the
@@ -474,6 +528,11 @@ analysis found the function; dynamic analysis reads its arguments.
 
 - **`.pdata` is x64-only.** On a 32-bit image `function_bounds` returns `None`, `exception_table`
   is empty, and `xrefs_to_rva` relies entirely on pass B (`scan_gaps=True`, the default).
+- **Scanning for `call`/`jmp` is the wrong question for most C++ callees.** Virtual methods, IDL
+  binding-table entries and import thunks are reached through a pointer, so a code-section scan
+  finds nothing regardless of how heavily used they are. `function_xrefs` sweeps code *and* data
+  and says which case it is. *(enforced:
+  `tests/test_pe_rva.py::test_call_jmp_scan_cannot_see_an_indirect_only_callee`)*
 - **`rip` finding nothing is not proof of absence.** Try `ptr` on `.rdata`, widen the range, and
   check `find_inline_strings` — a string built from immediates has no address to reference, so
   every xref scan and every contiguous byte search misses it by construction. Only a string of
