@@ -12,8 +12,10 @@ from __future__ import annotations
 import math
 import re
 import struct
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+
 
 from typing import Any
 
@@ -251,24 +253,87 @@ def disassemble(
 # ── String Extraction ─────────────────────────────────────────
 
 
+def _offset_mapper(binary_path: str | Path):
+    """Return a file-offset -> (rva, section) mapper; a no-op for non-PE input.
+
+    A hit is only actionable if it can be handed to the RVA tools (``xrefs_to_rva``,
+    ``function_bounds``), and a file offset is not an RVA — the delta differs per
+    section, so a single constant is wrong as soon as a boundary is crossed.
+    """
+    try:
+        from fridapilot.tools.pe_rva import PEImage
+        img = PEImage(binary_path)
+    except Exception:
+        return lambda off: (None, "")
+
+    headers_end = min((praw for _va, _vs, praw, _rs, _n in img._sections), default=0)
+
+    def mapper(off: int) -> tuple[int | None, str]:
+        rva = img.off_to_rva(off)
+        if rva is None:
+            # Before the first section the file is the headers, where offset == RVA.
+            return (off, "(headers)") if off < headers_end else (None, "")
+        return rva, img.section_of(rva) or ""
+
+    return mapper
+
+
+
+# Text codecs offered to the string/byte search. "ansi" is not one encoding: on a
+# Chinese Windows it is CP936, on a Japanese one CP932, so the caller names the code
+# page explicitly instead of relying on the analyst's locale.
+TEXT_CODECS: dict[str, str] = {
+    "ascii": "ascii",
+    "utf8": "utf-8",
+    "utf16le": "utf-16-le",
+    "utf16be": "utf-16-be",
+    "latin1": "latin-1",
+    "gbk": "gbk",          # CP936, simplified Chinese
+    "gb18030": "gb18030",
+    "big5": "big5",        # traditional Chinese
+    "cp932": "cp932",      # Shift-JIS, Japanese
+    "cp949": "cp949",      # Korean
+    "cp1251": "cp1251",    # Cyrillic
+    "cp1252": "cp1252",    # Western European
+}
+
+
+def _plausible_text(value: str) -> float:
+    """Fraction of characters that look like real text rather than mojibake."""
+    if not value:
+        return 0.0
+    good = 0
+    for ch in value:
+        category = unicodedata.category(ch)
+        if category[0] in ("L", "N") or category in ("Pd", "Po", "Ps", "Pe", "Zs"):
+            good += 1
+    return good / len(value)
+
+
 def find_strings(
     binary_path: str | Path,
     min_len: int = 4,
     encoding: str = "all",
     limit: int = 1000,
+    codepage: str = "",
 ) -> list[StringMatch]:
     """Extract strings from a binary file.
 
-    Supports ASCII, UTF-16LE, and UTF-8 extraction.
+    Supports ASCII, UTF-16LE and UTF-8 extraction, plus an explicit legacy code page
+    (``codepage="gbk"``, ``"cp932"``, ``"cp1251"``, …). The ASCII extractor only
+    accepts bytes 0x20-0x7e, so a GBK or Shift-JIS string is invisible to it — that
+    is what the code page mode is for.
 
     Args:
         binary_path: Path to the binary file.
         min_len: Minimum string length.
         encoding: "ascii", "utf16le", "utf8", or "all".
         limit: Maximum number of strings to return.
+        codepage: Also extract strings in this legacy code page (see TEXT_CODECS).
 
     Returns:
-        List of StringMatch with offset, value, and encoding.
+        List of StringMatch with offset, value, encoding and — for PE input — the
+        rva and section name.
     """
     data = Path(binary_path).read_bytes()
     results: list[StringMatch] = []
@@ -319,15 +384,97 @@ def find_strings(
                 break
         return matches
 
+    def _extract_codepage(data: bytes, codec: str) -> list[StringMatch]:
+        """Legacy double-byte code pages.
+
+        Almost any high-byte pair decodes to *something* in GBK or CP932, so a
+        decode success proves nothing: the run is kept only when the text survives a
+        plausibility check (letters/digits/punctuation, few replacement chars).
+        """
+        # printable ASCII plus the lead/trail byte range used by DBCS code pages
+        pattern = re.compile(rb"[\x20-\x7e\x81-\xfe]{%d,}" % max(min_len, 2))
+        matches = []
+        for m in pattern.finditer(data):
+            chunk = m.group()
+            value = chunk.decode(codec, errors="replace")
+            if value.count("\ufffd") > max(1, len(value) * 0.05):
+                continue
+            if not any(ord(c) > 127 for c in value):
+                continue                       # pure ASCII: the ascii pass has it
+            if len(value) < min_len or _plausible_text(value) < 0.85:
+                continue
+            matches.append(StringMatch(offset=m.start(), value=value, encoding=codec))
+            if len(matches) >= limit:
+                break
+        return matches
+
     if encoding in ("ascii", "all"):
         results.extend(_extract_ascii(data))
     if encoding in ("utf16le", "all"):
         results.extend(_extract_utf16le(data))
     if encoding in ("utf8", "all"):
         results.extend(_extract_utf8(data))
+    if codepage:
+        codec = TEXT_CODECS.get(codepage.lower(), codepage)
+        results.extend(_extract_codepage(data, codec))
+
+    results.sort(key=lambda s: s.offset)
+    results = results[:limit]
+
+    mapper = _offset_mapper(binary_path)
+    for match in results:
+        match.rva, match.section = mapper(match.offset)
+    return results
+
+
+def find_text(
+    binary_path: str | Path,
+    text: str,
+    encodings: tuple[str, ...] = ("ascii", "utf8", "utf16le", "gbk"),
+    limit: int = 100,
+) -> list[StringMatch]:
+    """Locate one piece of text encoded several ways at once.
+
+    The point is not knowing the encoding in advance: a Chinese UI string may be
+    UTF-8 in one build, UTF-16LE in another and CP936 in a third, and extracting
+    every string just to grep them wastes a full pass. Each requested codec is
+    applied to ``text`` and the resulting bytes are searched directly. Codecs that
+    cannot represent the text are skipped, so the encodings that *do* appear in the
+    result tell you how the binary stores it.
+
+    Returns:
+        List of StringMatch (value = ``text``) with offset, encoding, and for PE
+        input the rva and section.
+    """
+    data = Path(binary_path).read_bytes()
+    mapper = _offset_mapper(binary_path)
+    results: list[StringMatch] = []
+
+    # Several code pages encode the same ASCII text to identical bytes (ascii and
+    # gbk agree on "config"), so group codecs by the bytes they produce: one scan
+    # per distinct pattern, labelled with every codec that yields it.
+    patterns: dict[bytes, list[str]] = {}
+    for name in encodings:
+        codec = TEXT_CODECS.get(name.lower(), name)
+        try:
+            needle = text.encode(codec)
+        except (UnicodeEncodeError, LookupError):
+            continue                     # this code page cannot express the text
+        if needle:
+            patterns.setdefault(needle, []).append(name)
+
+    for needle, names in patterns.items():
+        label = "/".join(names)
+        pos = data.find(needle)
+        while pos >= 0 and len(results) < limit:
+            rva, section = mapper(pos)
+            results.append(StringMatch(offset=pos, value=text, encoding=label,
+                                       rva=rva, section=section))
+            pos = data.find(needle, pos + 1)
 
     results.sort(key=lambda s: s.offset)
     return results[:limit]
+
 
 
 def search_bytes(
@@ -346,7 +493,8 @@ def search_bytes(
         limit: Maximum number of matches to return.
 
     Returns:
-        List of ByteMatch with offset and matched bytes.
+        List of ByteMatch with offset, matched bytes and — for PE input — the rva
+        and section name.
     """
     data = Path(binary_path).read_bytes()
 
@@ -368,16 +516,21 @@ def search_bytes(
     byte_regex = b"".join(regex_parts)
     compiled = re.compile(byte_regex, re.DOTALL)
 
+    mapper = _offset_mapper(binary_path)
     results: list[ByteMatch] = []
     for m in compiled.finditer(data):
+        rva, section = mapper(m.start())
         results.append(ByteMatch(
             offset=m.start(),
             matched_bytes=m.group().hex(),
+            rva=rva,
+            section=section,
         ))
         if len(results) >= limit:
             break
 
     return results
+
 
 
 # ── Cross-References ──────────────────────────────────────────

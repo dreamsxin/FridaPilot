@@ -120,16 +120,25 @@ class DisassemblyResult(BaseModel):
 
 
 class StringMatch(BaseModel):
-    """A string found in a binary."""
+    """A string found in a binary.
+
+    ``rva``/``section`` are filled for PE input: a file offset cannot be fed to the
+    RVA tools (xrefs_to_rva, function_bounds) because the delta differs per section.
+    """
     offset: int
     value: str
     encoding: str = "ascii"
+    rva: int | None = None
+    section: str = ""
 
 
 class ByteMatch(BaseModel):
     """A byte pattern match in a binary."""
     offset: int
     matched_bytes: str  # hex representation
+    rva: int | None = None
+    section: str = ""
+
 
 
 class XrefResult(BaseModel):
