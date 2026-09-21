@@ -35,19 +35,26 @@ def observe_cmd(
     inject(session, script_source)
     console.print(f"[green]Observing {session.target} (PID: {session.pid})...[/green]")
 
+    archived: list = []
     try:
         if timeout > 0:
             time.sleep(timeout)
         else:
             while True:
                 time.sleep(0.5)
-                for msg in session.observer.messages:
+                # Archive first, display second: the report file must
+                # contain every message even though interactive printing
+                # drains the live queue (audit finding M-C6).
+                pending, session.observer.messages[:] = session.observer.messages, []
+                archived.extend(pending)
+                for msg in pending:
                     console.print(f"  [{msg.type}] {msg.payload}")
-                session.observer.messages.clear()
     except KeyboardInterrupt:
         pass
     finally:
-        messages = [m.to_dict() for m in session.observer.messages]
+        archived.extend(session.observer.messages)
+        session.observer.messages.clear()
+        messages = [m.to_dict() for m in archived]
         detach(session)
 
     if output:

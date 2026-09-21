@@ -359,12 +359,33 @@ class DebugSession:
                     raise ValueError(f"Process not found: {self.target}")
             self.session = self.device.attach(self.pid)
 
-        self.script = self.session.create_script(_DEBUGGER_SCRIPT)
-        self.script.on("message", self._on_message)
-        self.script.load()
+        try:
+            self.script = self.session.create_script(_DEBUGGER_SCRIPT)
+            self.script.on("message", self._on_message)
+            self.script.load()
 
-        self.arch = self.script.exports_sync.get_arch()
-        self.platform = self.script.exports_sync.get_platform()
+            self.arch = self.script.exports_sync.get_arch()
+            self.platform = self.script.exports_sync.get_platform()
+        except Exception:
+            # A half-connected state must not leak: detach and, for a
+            # spawned target, kill the still-suspended process
+            # (audit finding M-D5).
+            try:
+                if self.script is not None:
+                    self.script.unload()
+            except Exception:
+                pass
+            try:
+                if self.session is not None:
+                    self.session.detach()
+            except Exception:
+                pass
+            if self.spawn and self.pid:
+                try:
+                    self.device.kill(self.pid)
+                except Exception:
+                    pass
+            raise
 
         if self.spawn:
             self.device.resume(self.pid)

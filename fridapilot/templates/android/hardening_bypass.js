@@ -14,6 +14,7 @@ function fpFindModule(moduleName) {
     if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
     return Module.findModuleByName(moduleName);
 }
+var fpNoopThread = new NativeCallback(function () { return ptr(0); }, 'pointer', ['pointer']);
 // FridaPilot - Android Packer/Protector Bypass
 
 if (typeof Java !== "undefined" && Java.available) Java.perform(() => {
@@ -67,7 +68,10 @@ if (typeof Java !== "undefined" && Java.available) Java.perform(() => {
                     try { moduleName = Process.findModuleByAddress(funcAddr).name; } catch(e) {}
                     if (moduleName === 'libjiagu.so') {
                         send({ type: 'bypass_360', detail: 'Blocking anti-debug thread from libjiagu.so' });
-                        args[2] = ptr(0); // Null out thread function
+                        // Point the start routine at a no-op stub: bionic does
+                        // not validate pthread_create's argument, so a NULL
+                        // routine segfaults the whole process (audit M-T3).
+                        args[2] = fpNoopThread;
                     }
                 }
             });

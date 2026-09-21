@@ -73,7 +73,7 @@ def dump_memory(session: frida.core.Session, address: str, size: int) -> DumpRes
     """
     script = session.create_script(f"""
         rpc.exports.dump = () => {{
-            const buf = Memory.readByteArray(ptr('{address}'), {size});
+            const buf = ptr('{address}').readByteArray({size});
             return buf ? Array.from(new Uint8Array(buf)) : [];
         }};
     """)
@@ -120,7 +120,7 @@ def dump_strings(
                 if (results.length >= maxResults) return;
                 try {{
                     const size = Math.min(range.size, 1048576); // Max 1MB per region
-                    const data = Memory.readByteArray(range.base, size);
+                    const data = range.base.readByteArray(size);
                     if (!data) return;
                     const bytes = new Uint8Array(data);
                     let current = [];
@@ -128,7 +128,11 @@ def dump_strings(
                     for (let i = 0; i < bytes.length; i++) {{
                         if (bytes[i] >= 0x20 && bytes[i] < 0x7f) {{
                             if (current.length === 0) startAddr = i;
-                            current.push(bytes[i]);
+                            // Cap the run: String.fromCharCode.apply throws
+                            // RangeError beyond ~1e5 args and the outer catch
+                            // silently skipped the rest of the region; the value
+                            // is truncated to 200 chars anyway (audit M-C4).
+                            if (current.length < 256) current.push(bytes[i]);
                         }} else {{
                             if (current.length >= minLen) {{
                                 results.push({{
@@ -176,10 +180,13 @@ def dump_module_memory(
         rpc.exports.dumpModule = () => {{
             const mod = Process.findModuleByName('{module_name}');
             if (!mod) return {{ error: 'Module not found', data: [] }};
-            const buf = Memory.readByteArray(mod.base, Math.min(mod.size, 10485760)); // Max 10MB
+            const capped = Math.min(mod.size, 10485760); // Max 10MB
+            const buf = mod.base.readByteArray(capped);
             return {{
                 base: mod.base.toString(),
-                size: mod.size,
+                size: buf ? capped : 0,        // size of the data actually returned
+                module_size: mod.size,         // full module size
+                truncated: !!buf && mod.size > capped,
                 data: buf ? Array.from(new Uint8Array(buf)) : []
             }};
         }};
@@ -192,9 +199,17 @@ def dump_module_memory(
         return DumpResult(address="0x0", size=0)
 
     data = bytes(result.get("data", []))
+    if result.get("truncated"):
+        # size must describe the DATA returned (audit finding M-C3: it
+        # used to report the full module size while capping at 10MB).
+        import logging
+        logging.getLogger(__name__).warning(
+            "dump_module_memory: module %s has %s bytes; returned the "
+            "first %s (10MB cap)", module_name,
+            result.get("module_size", 0), len(data))
     return DumpResult(
         address=result.get("base", "0x0"),
-        size=result.get("size", 0),
+        size=len(data),
         data=data,
         hex_view=_format_hex_view(data[:256], result.get("base", "0x0")),
         ascii_preview="".join(chr(b) if 0x20 <= b < 0x7f else "." for b in data[:200]),

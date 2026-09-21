@@ -27,15 +27,17 @@ def recon_modules(
     except ValueError:
         session = attach(target, device_type, host)
 
-    modules = enumerate_modules(session.frida_session)
-    table = Table(title=f"Modules ({session.target})")
-    table.add_column("Name", style="cyan")
-    table.add_column("Base", style="green")
-    table.add_column("Size", justify="right")
-    for m in modules:
-        table.add_row(m.name, m.base_address, str(m.size))
-    console.print(table)
-    detach(session)
+    try:
+        modules = enumerate_modules(session.frida_session)
+        table = Table(title=f"Modules ({session.target})")
+        table.add_column("Name", style="cyan")
+        table.add_column("Base", style="green")
+        table.add_column("Size", justify="right")
+        for m in modules:
+            table.add_row(m.name, m.base_address, str(m.size))
+        console.print(table)
+    finally:
+        detach(session)
 
 
 @recon_app.command("classes")
@@ -56,11 +58,13 @@ def recon_classes(
     except ValueError:
         session = attach(target, device_type, host)
 
-    classes = enumerate_classes(session.frida_session, filter_prefix=filter)
-    for c in classes:
-        console.print(c.name)
-    console.print(f"[dim]Total: {len(classes)} classes[/dim]")
-    detach(session)
+    try:
+        classes = enumerate_classes(session.frida_session, filter_prefix=filter)
+        for c in classes:
+            console.print(c.name)
+        console.print(f"[dim]Total: {len(classes)} classes[/dim]")
+    finally:
+        detach(session)
 
 
 @recon_app.command("methods")
@@ -81,11 +85,13 @@ def recon_methods(
     except ValueError:
         session = attach(target, device_type, host)
 
-    methods = enumerate_methods(session.frida_session, class_name)
-    for m in methods:
-        console.print(m)
-    console.print(f"[dim]Total: {len(methods)} methods[/dim]")
-    detach(session)
+    try:
+        methods = enumerate_methods(session.frida_session, class_name)
+        for m in methods:
+            console.print(m)
+        console.print(f"[dim]Total: {len(methods)} methods[/dim]")
+    finally:
+        detach(session)
 
 
 @recon_app.command("exports")

@@ -6,6 +6,7 @@ No LLM dependency.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -64,9 +65,33 @@ def get_template(name: str, **kwargs: Any) -> str:
         raise FileNotFoundError(f"Template file not found: {template_path}")
 
     content = template_path.read_text(encoding="utf-8")
-    # Simple {{variable}} substitution
+
+    def _js_escape(value: Any) -> str:
+        """Escape a value for interpolation into a single-quoted JS string.
+
+        Template placeholders sit inside '...' literals, so the dangerous
+        characters are backslash, single quote and line breaks. Without
+        this, a value like `it's` breaks the generated script or injects
+        code (audit finding M-C7).
+        """
+        text = str(value)
+        return (text.replace("\\", "\\\\")
+                    .replace("'", "\\'")
+                    .replace("\n", "\\n")
+                    .replace("\r", "\\r"))
+
     for key, value in kwargs.items():
-        content = content.replace(f"{{{{{key}}}}}", str(value))
+        content = content.replace(f"{{{{{key}}}}}", _js_escape(value))
+
+    # A missing argument used to leave {{placeholders}} in the output and
+    # the broken script only failed later at load time - fail here instead
+    # with the exact list (audit finding M-C7).
+    leftover = sorted(set(re.findall(r"\{\{(\w+)\}\}", content)))
+    if leftover:
+        raise ValueError(
+            f"template '{name}' has unsubstituted placeholders: "
+            + ", ".join("{{" + p + "}}" for p in leftover)
+            + " - pass the matching arguments")
     return content
 
 

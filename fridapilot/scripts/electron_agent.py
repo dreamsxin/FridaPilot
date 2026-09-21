@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -129,9 +130,19 @@ def main():
     script_dir = Path(__file__).parent.parent / "templates" / "electron"
     script = load_script(session, str(script_dir / "comprehensive.js"))
 
+    # Flags map to real RPC entry points in the template now (audit M-T2).
     if args.devtools:
-        script.exports_sync  # ensure loaded
-        print("[*] DevTools force-open requested (will trigger on next BrowserWindow)")
+        try:
+            script.exports_sync.force_dev_tools()
+            print("[*] DevTools force-open requested")
+        except Exception as exc:
+            print(f"[!] DevTools force-open failed: {exc}")
+    if args.dump_asar:
+        try:
+            info = script.exports_sync.enumerate_asar()
+            print(f"[*] ASAR enumeration: {json.dumps(info, default=str)}")
+        except Exception as exc:
+            print(f"[!] ASAR enumeration failed: {exc}")
 
     print("[*] Monitoring Electron app... Press Ctrl+C to stop.\n")
 

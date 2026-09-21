@@ -31,7 +31,12 @@ def template_cmd(
     if module_name:
         kwargs["module_name"] = module_name
 
-    script = get_template(name, **kwargs)
+    try:
+        script = get_template(name, **kwargs)
+    except ValueError as exc:
+        # Unknown template or unsubstituted placeholders (M-C7)
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
 
     if output:
         from pathlib import Path

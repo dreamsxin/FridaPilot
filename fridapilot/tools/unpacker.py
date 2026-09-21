@@ -248,19 +248,28 @@ def dump_process_memory(
         script = session.create_script("""
             rpc.exports.dumpMain = () => {
                 const main = Process.enumerateModules()[0];
-                const buf = Memory.readByteArray(main.base, main.size);
+                const capped = Math.min(main.size, 10485760); // Max 10MB, matches dump.py
+                const buf = main.base.readByteArray(capped);
                 return {
                     name: main.name,
                     base: main.base.toString(),
                     size: main.size,
+                    truncated: main.size > capped,
                     data: buf ? Array.from(new Uint8Array(buf)) : []
                 };
             };
         """)
-        script.load()
-        result = script.exports_sync.dump_main()
-        script.unload()
-        session.detach()
+        try:
+            script.load()
+            result = script.exports_sync.dump_main()
+        finally:
+            # Failure paths must not leak the injected script or the
+            # session (audit finding M-C2).
+            try:
+                script.unload()
+            except Exception:
+                pass
+            session.detach()
 
         dump_data = bytes(result.get("data", []))
         if not dump_data:

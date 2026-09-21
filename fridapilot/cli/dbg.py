@@ -75,7 +75,8 @@ def dbg_cmd(
         raise typer.Exit(1)
 
     last_hit = None  # Most recent BreakpointHit
-    multi_state = {"mgr": None, "active_session": None}  # Multi-session state
+    multi_state = {"mgr": None, "active_session": None,
+                   "device_type": device_type, "host": host}  # Multi-session state
 
     # ── REPL Loop ─────────────────────────────────────────
     try:
@@ -94,6 +95,12 @@ def dbg_cmd(
             parts = raw.split(None, 1)
             cmd = parts[0].lower()
             args_str = parts[1] if len(parts) > 1 else ""
+            # GDB muscle memory: `x/s 0x401000` must reach the examine
+            # handler with the /s flag intact (audit finding M-D1 - it
+            # used to fall through to "Unknown command").
+            if cmd.startswith("x/"):
+                args_str = cmd[1:] + ((" " + args_str) if args_str else "")
+                cmd = "x"
 
             # Everything below acts on the active session (`session switch`), or on
             # the --target process when none is selected.
@@ -280,7 +287,14 @@ def _cmd_list_bp(dbg) -> None:
     console.print(table)
 
 def _cmd_continue(dbg, args_str: str):
-    timeout = float(args_str.strip()) if args_str.strip() else 0
+    try:
+        timeout = float(args_str.strip()) if args_str.strip() else 0
+    except ValueError:
+        console.print("[red]Usage: c [timeout-seconds][/red]")
+        return None
+    if timeout != timeout or timeout == float("inf") or timeout < 0:
+        console.print("[red]Invalid timeout: use a finite number >= 0[/red]")
+        return None
     console.print("[dim]Waiting for breakpoint hit... (Ctrl+C to cancel)[/dim]")
     try:
         hit = dbg.wait_for_hit(timeout=timeout)
@@ -303,7 +317,11 @@ def _cmd_regs(dbg, last_hit) -> None:
     if last_hit and last_hit.registers.registers:
         regs = last_hit.registers.registers
     else:
-        state = dbg.get_registers()
+        try:
+            state = dbg.get_registers()
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
         regs = state.registers
     if not regs:
         console.print("[yellow]No register data available[/yellow]")
@@ -331,7 +349,11 @@ def _cmd_examine(dbg, args_str: str) -> None:
         return
     parts = args_str.split()
     addr = parts[0]
-    size = int(parts[1]) if len(parts) > 1 else 64
+    try:
+        size = int(parts[1]) if len(parts) > 1 else 64
+    except ValueError:
+        console.print("[red]Usage: x <address> [size] - size must be an integer[/red]")
+        return
     try:
         dump = dbg.examine(addr, size)
         console.print(dump)
@@ -347,7 +369,11 @@ def _cmd_disasm(dbg, args_str: str, last_hit) -> None:
     elif args_str:
         parts = args_str.split()
         addr = parts[0]
-        count = int(parts[1]) if len(parts) > 1 else 10
+        try:
+            count = int(parts[1]) if len(parts) > 1 else 10
+        except ValueError:
+            console.print("[red]Usage: dis <address> [count] - count must be an integer[/red]")
+            return
     else:
         console.print("[red]Usage: dis <address> [count][/red]")
         return
@@ -388,7 +414,11 @@ def _cmd_watch(dbg, args_str: str) -> None:
     if len(parts) < 2:
         console.print("[red]Usage: w <address> <size>[/red]")
         return
-    addr, size = parts[0], int(parts[1])
+    try:
+        addr, size = parts[0], int(parts[1])
+    except ValueError:
+        console.print("[red]Usage: w <address> <size> - size must be an integer[/red]")
+        return
     console.print(f"  Watching {size} bytes at {addr}... (Ctrl+C to stop)")
     prev = dbg.read_memory(addr, size)
     try:
@@ -434,7 +464,11 @@ def _cmd_info(dbg, args_str: str) -> None:
     subcmd = sub[0] if sub else ""
 
     if subcmd == "modules":
-        mods = dbg.get_modules()
+        try:
+            mods = dbg.get_modules()
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
         table = Table(title=f"Modules ({len(mods)})")
         table.add_column("Name")
         table.add_column("Base", justify="right")
@@ -450,7 +484,11 @@ def _cmd_info(dbg, args_str: str) -> None:
         if not mod:
             console.print("[red]Usage: info exports <module_name>[/red]")
             return
-        exports = dbg.get_exports(mod)
+        try:
+            exports = dbg.get_exports(mod)
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
         table = Table(title=f"Exports: {mod} ({len(exports)})")
         table.add_column("Name")
         table.add_column("Address", justify="right")
@@ -460,7 +498,11 @@ def _cmd_info(dbg, args_str: str) -> None:
         console.print(table)
 
     elif subcmd == "threads":
-        threads = dbg.get_threads()
+        try:
+            threads = dbg.get_threads()
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
         table = Table(title=f"Threads ({len(threads)})")
         table.add_column("ID", justify="right")
         table.add_column("State")
@@ -525,11 +567,18 @@ def _cmd_session(args_str: str, state: dict) -> None:
                 tgt = int(target)
             except ValueError:
                 tgt = target
-            sess = mgr.create(name, tgt, spawn=spawn)
+            sess = mgr.create(name, tgt, device_type=state.get("device_type"),
+                              host=state.get("host", ""), spawn=spawn)
             sess.connect()
             console.print(f"  [green]Session '{name}' created[/green]: PID={sess.pid} Arch={sess.arch}")
         except Exception as e:
             console.print(f"  [red]Failed: {e}[/red]")
+            # Roll back the half-created entry so `session list` does not
+            # show a dead session (audit finding M-D5).
+            try:
+                mgr.remove(name)
+            except Exception:
+                pass
 
     elif subcmd == "list":
         if not mgr:
@@ -596,7 +645,14 @@ def _cmd_wait_any(state: dict, args_str: str):
         console.print("[yellow]No multi-session manager. Use 'session create' first.[/yellow]")
         return None
 
-    timeout = float(args_str.strip()) if args_str.strip() else 0
+    try:
+        timeout = float(args_str.strip()) if args_str.strip() else 0
+    except ValueError:
+        console.print("[red]Usage: wait-any [timeout-seconds][/red]")
+        return None
+    if timeout != timeout or timeout == float("inf") or timeout < 0:
+        console.print("[red]Invalid timeout: use a finite number >= 0[/red]")
+        return None
     console.print("[dim]Waiting for hit from any session... (Ctrl+C to cancel)[/dim]")
     try:
         result = mgr.wait_any(timeout=timeout)

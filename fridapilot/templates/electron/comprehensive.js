@@ -251,29 +251,30 @@ function detectFuses() {
 // 8. asar 包内容枚举
 // ═══════════════════════════════════════════════════════════
 function enumerateAsar() {
+    // Returns a payload so the agent can honor --dump-asar via RPC
+    // (audit finding M-T2: the flag used to be decorative).
+    const payload = { appPath: null, topLevel: [], package: null };
     try {
         const path = require('path');
         const fs = require('fs');
         const appPath = require('electron').app.getAppPath();
+        payload.appPath = appPath;
         send({ type: 'electron_app_path', path: appPath });
 
-        // List top-level files
         const files = fs.readdirSync(appPath);
+        payload.topLevel = files.slice(0, 50);
         send({ type: 'asar_contents', topLevel: files.slice(0, 50) });
 
-        // Find package.json
         const pkgPath = path.join(appPath, 'package.json');
         if (fs.existsSync(pkgPath)) {
             const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-            send({
-                type: 'electron_package',
-                name: pkg.name,
-                version: pkg.version,
-                main: pkg.main,
-                dependencies: Object.keys(pkg.dependencies || {})
-            });
+            payload.package = { name: pkg.name, version: pkg.version,
+                main: pkg.main, dependencies: Object.keys(pkg.dependencies || {}) };
+            send({ type: 'electron_package', name: pkg.name, version: pkg.version,
+                main: pkg.main, dependencies: Object.keys(pkg.dependencies || {}) });
         }
     } catch(e) {}
+    return payload;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -297,5 +298,12 @@ hookBrowserWindow();
 hookNodeModules();
 detectFuses();
 enumerateAsar();
+
+// Real RPC entry points so the agent can honor --devtools / --dump-asar
+// instead of the flags being decorative (audit finding M-T2).
+rpc.exports = {
+    forceDevTools: forceDevTools,
+    enumerateAsar: enumerateAsar
+};
 
 console.log('[FridaPilot] Electron comprehensive hooks loaded');
