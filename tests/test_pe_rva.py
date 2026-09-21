@@ -41,7 +41,6 @@ from fridapilot.tools.pe_rva import (
     xrefs_to_rva,
 )
 
-
 from .synthetic_pe import (
     CALL_TARGET_RVA,
     CTOR_RVA,
@@ -50,6 +49,7 @@ from .synthetic_pe import (
     INDIRECT_FN_RVA,
     INLINE_RVA,
     INLINE_TEXT,
+    LEAF_RVA,
     MARKER_TEXT,
     PTR_RVA,
     RDATA_RVA,
@@ -58,7 +58,6 @@ from .synthetic_pe import (
     TARGET_RVA,
     TEXT_RVA,
     TEXT_VSIZE,
-    LEAF_RVA,
     UNWIND_RVA,
     VTABLE_ENTRIES,
     VTABLE_RVA,
@@ -281,10 +280,11 @@ NTDLL = r"C:\Windows\System32\ntdll.dll"
 
 @pytest.mark.skipif(sys.platform != "win32", reason="needs a real x64 PE from Windows")
 def test_ntdll_matches_full_disassembly_ground_truth():
-    import capstone
-    from capstone import x86 as cx86
     from collections import defaultdict
     from pathlib import Path
+
+    import capstone
+    from capstone import x86 as cx86
 
     if not Path(NTDLL).is_file():
         pytest.skip("ntdll.dll not available")
@@ -701,10 +701,10 @@ def test_ntdll_targets_referenced_exactly_once_survive_the_prefilter():
     if one form is missed. A global touched once does not, which is why ground truth
     here is filtered down to exactly those.
     """
-    import capstone
     from collections import defaultdict
     from pathlib import Path
 
+    import capstone
     from capstone import x86 as cx86
 
     if not Path(NTDLL).is_file():

@@ -10,8 +10,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from fridapilot.agent.executor import ExecutionContext, StepResult
 from fridapilot.agent.planner import ExecutionPlan
-from fridapilot.agent.executor import StepResult, ExecutionContext
 
 
 @dataclass

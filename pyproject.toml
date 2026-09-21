@@ -35,7 +35,10 @@ mcp = [
 
 dev = [
     "pytest>=7.0.0",
-    "ruff>=0.4.0",
+    # Upper bound on purpose: ruff's DEFAULT rule set changes between releases, so an
+    # unpinned linter turns CI red without a single line of code changing. The explicit
+    # [tool.ruff.lint] select below is the real defence; this keeps the surprise small.
+    "ruff>=0.4.0,<0.17",
 ]
 
 [project.scripts]
@@ -45,6 +48,17 @@ frida-pilot = "fridapilot.cli.main:app"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+[tool.ruff.lint]
+# Spelled out rather than inherited: CI installs ruff fresh, and a release that widens
+# the defaults would otherwise "find" hundreds of new errors in unchanged code. That
+# already happened - a newer ruff added I/UP/RUF to its defaults and reported 178
+# errors, 102 of which were RUF001-003 complaining about the full-width punctuation in
+# this project's Chinese docstrings and comments. That punctuation is intentional, so
+# those rules are not part of this project's standard.
+#   E4/E7/E9 + F  what ruff has enforced here all along (real errors, not style)
+#   I             import order, because it is deterministic and auto-fixable
+select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.ruff.lint.per-file-ignores]
 # main.py builds the Typer app first, then imports and registers every

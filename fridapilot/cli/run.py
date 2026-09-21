@@ -57,8 +57,8 @@ async def _run_agent(
     analyze: str = "",
 ) -> None:
     """Async agent execution loop."""
-    from fridapilot.agent.planner import create_plan
     from fridapilot.agent.executor import execute_plan
+    from fridapilot.agent.planner import create_plan
     from fridapilot.agent.reflector import reflect_and_fix
     from fridapilot.agent.reporter import generate_report, save_report
 
@@ -152,7 +152,9 @@ async def _run_analysis(
 ) -> None:
     """Run AI analysis on collected execution data using prompt templates."""
     import json as json_mod
+
     from litellm import acompletion
+
     from fridapilot.agent.prompts import get_prompt
     from fridapilot.agent.reporter import _safe_str
 

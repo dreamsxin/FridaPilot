@@ -49,7 +49,6 @@ from .synthetic_apk import (
     write_apk,
 )
 
-
 # ── manifest parsing ────────────────────────────────────────────────────────
 
 def test_manifest_fields_come_from_attributes_not_string_guessing():

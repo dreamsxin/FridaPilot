@@ -20,7 +20,7 @@ def observe_cmd(
     import json
     import time
 
-    from fridapilot.tools.injector import attach, inject, detach
+    from fridapilot.tools.injector import attach, detach, inject
     from fridapilot.tools.script_forge import load_script_file
 
     device_type = DeviceType(device)

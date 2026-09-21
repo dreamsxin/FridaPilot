@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 import frida
 
 from fridapilot.models.schemas import DeviceType
-from fridapilot.tools.recon import get_device
 from fridapilot.tools.observer import Observer
+from fridapilot.tools.recon import get_device
 
 
 @dataclass

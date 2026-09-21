@@ -22,7 +22,6 @@ import frida
 from fridapilot.models.schemas import DeviceType
 from fridapilot.tools.recon import get_device
 
-
 # ── Data Models ───────────────────────────────────────────────
 
 

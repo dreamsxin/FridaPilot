@@ -16,11 +16,10 @@ No LLM dependency.
 
 from __future__ import annotations
 
-import struct
 import math
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-
 
 # AES S-Box (standard, used for fingerprinting)
 AES_SBOX = bytes([
@@ -408,8 +407,8 @@ def bruteforce_key(
     Returns:
         List of BruteforceResult for each successful decryption candidate.
     """
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
     if key_sizes is None:
         key_sizes = [16, 32]

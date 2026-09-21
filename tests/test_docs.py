@@ -38,7 +38,6 @@ from .synthetic_pe import (
     write_synthetic_pe,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS = [
     REPO_ROOT / "AGENTS.md",

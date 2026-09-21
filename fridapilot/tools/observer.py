@@ -13,7 +13,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-
 # ── Sensitive data detection patterns ─────────────────────────
 
 _SENSITIVE_PATTERNS: dict[str, re.Pattern] = {

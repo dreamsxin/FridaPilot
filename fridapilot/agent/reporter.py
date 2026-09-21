@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fridapilot.agent.executor import StepResult, ExecutionContext
+from fridapilot.agent.executor import ExecutionContext, StepResult
 from fridapilot.agent.planner import ExecutionPlan
 
 

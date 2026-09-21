@@ -2,8 +2,8 @@
 
 import typer
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
+from rich.table import Table
 
 console = Console()
 crypto_app = typer.Typer(no_args_is_help=True)
@@ -16,6 +16,7 @@ def crypto_scan(
 ) -> None:
     """Scan a binary for crypto indicators, S-Box, imports, and protection level."""
     import json as json_mod
+
     from fridapilot.tools.crypto_reverse import scan_binary
 
     result = scan_binary(binary)
@@ -82,9 +83,10 @@ def crypto_hook_bcrypt(
 ) -> None:
     """Hook Windows BCrypt APIs to capture encryption keys at runtime."""
     import time
+
     from fridapilot.models.schemas import DeviceType
     from fridapilot.tools.crypto_reverse import get_bcrypt_hook_script
-    from fridapilot.tools.injector import attach, inject, detach
+    from fridapilot.tools.injector import attach, detach, inject
 
     device_type = DeviceType(device)
     try:
@@ -130,6 +132,7 @@ def crypto_bruteforce(
     """Brute-force search for AES key in a binary by attempting decryption."""
     import base64
     from pathlib import Path
+
     from fridapilot.tools.crypto_reverse import bruteforce_key
 
     ct_data = Path(ciphertext_file).read_bytes()
@@ -188,8 +191,11 @@ def crypto_xor(
 ) -> None:
     """XOR deobfuscation: single-byte brute-force or known-key decryption."""
     from pathlib import Path
+
     from fridapilot.tools.crypto_reverse import (
-        xor_deobfuscate, find_xor_key, bruteforce_single_byte_xor,
+        bruteforce_single_byte_xor,
+        find_xor_key,
+        xor_deobfuscate,
     )
 
     ct_data = Path(ciphertext_file).read_bytes()

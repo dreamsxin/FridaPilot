@@ -42,15 +42,19 @@ def _register_tools() -> None:
     if TOOL_REGISTRY:
         return
 
-    from fridapilot.tools import recon, injector, script_forge, bypass, crypto_reverse
-    from fridapilot.tools import binary_analysis
-    from fridapilot.tools import pe_rva
+    from fridapilot.tools import (
+        apk_analysis,
+        binary_analysis,
+        bypass,
+        crypto_reverse,
+        injector,
+        pe_rva,
+        recon,
+        script_forge,
+    )
     from fridapilot.tools import pe_metadata as pe_metadata_mod
     from fridapilot.tools import rip_index as rip_index_mod
-
     from fridapilot.tools import unpacker as unpacker_mod
-
-    from fridapilot.tools import apk_analysis
     from fridapilot.tools.lldb_bridge import LLDBBridge
 
     _lldb = LLDBBridge()

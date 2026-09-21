@@ -19,7 +19,7 @@ def bypass_ssl(
     import time
 
     from fridapilot.tools.bypass import get_ssl_bypass_script
-    from fridapilot.tools.injector import attach, inject, detach
+    from fridapilot.tools.injector import attach, detach, inject
 
     device_type = DeviceType(device)
     try:
@@ -53,7 +53,7 @@ def bypass_anti_debug(
     import time
 
     from fridapilot.tools.bypass import get_anti_debug_script
-    from fridapilot.tools.injector import attach, inject, detach
+    from fridapilot.tools.injector import attach, detach, inject
 
     device_type = DeviceType(device)
     try:

@@ -128,6 +128,13 @@ If a signature changes, fix the docs in the same commit — the test will point 
 ## Conventions
 
 - Python ≥ 3.11, `from __future__ import annotations`, `ruff` with `line-length = 100`.
+- **The ruff rule set is spelled out in `pyproject.toml`** (`select = ["E4","E7","E9","F","I"]`),
+  not inherited. A newer ruff widened its defaults to include `I`/`UP`/`RUF` and reported 178
+  errors in code nobody had touched — 102 of them `RUF001`-`RUF003` objecting to the full-width
+  punctuation in this project's Chinese docstrings. That punctuation is deliberate, so those
+  rules are not part of the standard here; if CI suddenly "finds" hundreds of style errors,
+  check the ruff version before changing code. The dev extra carries an upper bound for the
+  same reason.
 - Heavy imports (`capstone`, `pefile`, `frida`, `litellm`) go inside the function that needs
   them, so `fp --help` stays fast and a missing optional dependency only breaks its own command.
 - Comments explain *why*, especially where a simpler approach is wrong. The non-obvious

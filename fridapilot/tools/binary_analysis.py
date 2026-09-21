@@ -15,8 +15,6 @@ import struct
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-
-
 from typing import Any
 
 from fridapilot.models.schemas import (
@@ -31,7 +29,6 @@ from fridapilot.models.schemas import (
     StringMatch,
     XrefResult,
 )
-
 
 # ── PE Analysis ───────────────────────────────────────────────
 

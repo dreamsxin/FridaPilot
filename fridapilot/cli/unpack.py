@@ -2,8 +2,8 @@
 
 import typer
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
+from rich.table import Table
 
 console = Console()
 unpack_app = typer.Typer(no_args_is_help=True)
@@ -16,6 +16,7 @@ def detect_cmd(
 ) -> None:
     """Detect if a binary is packed and identify the packer type."""
     import json as json_mod
+
     from fridapilot.tools.unpacker import detect_packer
 
     info = detect_packer(binary)
@@ -66,6 +67,7 @@ def auto_cmd(
     For non-UPX packers, use `fp unpack dump` on the running process.
     """
     import json as json_mod
+
     from fridapilot.tools.unpacker import auto_unpack
 
     result = auto_unpack(binary, output)

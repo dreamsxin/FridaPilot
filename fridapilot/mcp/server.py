@@ -31,8 +31,6 @@ from mcp.server import MCPServer
 from fridapilot import __version__
 from fridapilot.models.schemas import DeviceType
 
-
-
 logger = logging.getLogger("fridapilot.mcp")
 _audit_logger = logging.getLogger("fridapilot.audit")
 
@@ -786,7 +784,8 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
 
     if name == "frida_inject_script":
         import time
-        from fridapilot.tools.injector import attach, inject, detach
+
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:
@@ -809,8 +808,9 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
 
     if name == "frida_bypass_ssl":
         import time
+
         from fridapilot.tools.bypass import get_ssl_bypass_script
-        from fridapilot.tools.injector import attach, inject, detach
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:
@@ -843,8 +843,9 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
 
     if name == "frida_crypto_hook_bcrypt":
         import time
+
         from fridapilot.tools.crypto_reverse import get_bcrypt_hook_script
-        from fridapilot.tools.injector import attach, inject, detach
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:
@@ -919,7 +920,8 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
 
     if name == "frida_hook_function":
         import time
-        from fridapilot.tools.injector import attach, inject, detach
+
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:
@@ -939,7 +941,8 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
 
     if name == "frida_hook_batch":
         import time
-        from fridapilot.tools.injector import attach, inject, detach
+
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:
@@ -960,7 +963,7 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
     # ── Memory Tool Handlers ──
 
     if name == "frida_read_memory":
-        from fridapilot.tools.injector import attach, inject, detach
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:
@@ -982,7 +985,7 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
             detach(session)
 
     if name == "frida_write_memory":
-        from fridapilot.tools.injector import attach, inject, detach
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:
@@ -1007,7 +1010,7 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
             detach(session)
 
     if name == "frida_search_memory":
-        from fridapilot.tools.injector import attach, inject, detach
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:
@@ -1044,7 +1047,7 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
             detach(session)
 
     if name == "frida_call_function":
-        from fridapilot.tools.injector import attach, inject, detach
+        from fridapilot.tools.injector import attach, detach, inject
         target = _resolve_target(arguments["target"])
         session = attach(target, device_type, host)
         try:

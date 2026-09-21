@@ -16,7 +16,7 @@ def template_cmd(
     module_name: str = typer.Option("", "--module", help="Module name for native templates."),
 ) -> None:
     """Use built-in Frida script templates."""
-    from fridapilot.tools.script_forge import list_templates, get_template
+    from fridapilot.tools.script_forge import get_template, list_templates
 
     if list_all:
         for t in list_templates():

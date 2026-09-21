@@ -4,12 +4,11 @@ import json as _json
 import sys
 from pathlib import Path
 
-
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.table import Table
 from rich.panel import Panel
+from rich.table import Table
 
 console = Console()
 err_console = Console(stderr=True)
@@ -1219,6 +1218,7 @@ def analyze_macho_cmd(
 ) -> None:
     """Analyze a Mach-O binary: header, segments, load commands, FairPlay encryption, dylibs."""
     import json as json_mod
+
     from fridapilot.tools.binary_analysis import analyze_macho
 
     result = analyze_macho(binary)

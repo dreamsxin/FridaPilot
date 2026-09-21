@@ -13,7 +13,6 @@ from pathlib import Path
 
 import frida
 
-
 SCRIPT_DIR = Path(__file__).parent.parent / "templates" / "android"
 
 
