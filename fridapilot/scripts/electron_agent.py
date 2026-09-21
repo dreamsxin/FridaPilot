@@ -50,12 +50,19 @@ LABELS = {
     "node_http": "http",
     "renderer_ready": "Renderer ready",
     "renderer_skip": "Renderer skipped",
+    "emit_dropped": "rate-limited",
     "hook_error": "HOOK ERROR",
     "health": "HEALTH",
 }
 
+# 决定"能不能监控"的钩子。其余（fuses/asar/app/http/contextBridge/BrowserWindow）
+# 是信息性探针：它们 miss 只说明这次拿不到那条信息，不代表 IPC/文件监控失效，
+# 因此不该把整次运行判为失败。
+REQUIRED_HOOKS = ("require:electron", "ipcMain", "node:fs", "node:child_process")
+
 
 def _print_payload(payload: dict) -> None:
+    """按 type 把模板回传的 payload 打成一行人类可读输出。"""
     t = payload.get("type", "?")
     label = LABELS.get(t, f"[{t}]")
     if t in ("ipc_main_on", "ipc_main_handle"):
@@ -77,7 +84,11 @@ def _print_payload(payload: dict) -> None:
 
 
 def _print_health_verdict(health: dict | None, source: str) -> bool:
-    """健康检查（H-T2 教训对策）：钩子计数不达标就明说，绝不打印 Monitoring。"""
+    """健康检查（H-T2 教训对策）：钩子计数不达标就明说，绝不打印 Monitoring。
+
+    只有 REQUIRED_HOOKS 里的钩子 miss 才判失败；信息性探针（fuses/asar/...）miss
+    降级为告警，否则一台读不到 fuses 哨兵的机器会让本来装好的 IPC 监控也被拒绝。
+    """
     if not health:
         print(f"[!] 未收到 {source} 通道的 health 消息 —— 目标可能阻止了该通道，"
               "不要相信本次监控输出。")
@@ -85,32 +96,52 @@ def _print_health_verdict(health: dict | None, source: str) -> bool:
     hooks = health.get("hooks", [])
     missed = [h for h in hooks if h.endswith(":miss")]
     print(f"[*] 健康检查：{len(hooks) - len(missed)}/{len(hooks)} 个钩子安装成功")
-    if missed:
-        print(f"[!] 未安装：{', '.join(missed)}")
-    return len(hooks) > 0 and not missed
+    required_missed = [h for h in missed if h[:-len(":miss")] in REQUIRED_HOOKS]
+    optional_missed = [h for h in missed if h not in required_missed]
+    if required_missed:
+        print(f"[!] 关键钩子未安装：{', '.join(required_missed)}")
+    if optional_missed:
+        print(f"[*] 信息性探针未命中（不影响监控）：{', '.join(optional_missed)}")
+    return len(hooks) > 0 and not required_missed
 
 
 def _spawn_and_find_ws(app: str, app_args: str, timeout: float) -> tuple[subprocess.Popen, str]:
     """Spawn the target with a free debugging port, then poll the HTTP
     endpoint (/json/version). Chromium/Electron launchers sometimes hand
     off to a child process, which makes the stderr line unreliable."""
+    from fridapilot.tools import cdp_client
+
     port = cdp_client.find_free_port()
     cmd = [app] + (app_args.split() if app_args else []) + \
         [f"--remote-debugging-port={port}", "--no-first-run"]
     print(f"[*] Spawning: {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace")
-    version = cdp_client.wait_for_endpoint(port, timeout=timeout)
-    if version is None:
-        raise RuntimeError("DevTools HTTP 端点未就绪 —— 目标可能不是 "
-                           "Electron/Chromium，或调试端口被禁用。")
-    ws = version.get("webSocketDebuggerUrl")
-    if not ws:
-        raise RuntimeError("DevTools 端点缺少 webSocketDebuggerUrl。")
+    # DEVNULL, not PIPE: nobody reads these pipes, and Electron fills the ~64 KB
+    # buffer quickly - the target then blocks forever in write() and looks hung.
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        version = cdp_client.wait_for_endpoint(port, timeout=timeout)
+        if version is None:
+            raise RuntimeError("DevTools HTTP 端点未就绪 —— 目标可能不是 "
+                               "Electron/Chromium，或调试端口被禁用。")
+        ws = version.get("webSocketDebuggerUrl")
+        if not ws:
+            raise RuntimeError("DevTools 端点缺少 webSocketDebuggerUrl。")
+    except BaseException:
+        # 我们启动的进程，失败时必须回收，否则留下一个持续输出的孤儿进程
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        raise
     return proc, ws
 
 
 def run_cdp(args) -> int:
+    """CDP 主通道：spawn（或复用）调试端口 → attach 各 target → 注入模板 → 等 health。
+
+    返回 0 表示监控正常结束，1 表示注入或健康检查失败（此时不会打印 Monitoring）。
+    """
     from fridapilot.tools import cdp_client
 
     proc = None
@@ -132,6 +163,7 @@ def run_cdp(args) -> int:
                    "renderer_src": (TEMPLATES / "cdp_renderer_hooks.js").read_text(encoding="utf-8")}
 
     def on_console(msg: dict) -> None:
+        """只收主进程会话的 __FP__ 消息，解析后打印并捕获 health。"""
         if msg.get("sessionId") != state["main_sid"]:
             return
         params = msg.get("params", {})
@@ -149,10 +181,16 @@ def run_cdp(args) -> int:
     conn.on_event("Runtime.consoleAPICalled", on_console)
 
     def attach_and_inject() -> None:
+        """attach 尚未见过的 target，按进程类型注入主进程/渲染进程模板。"""
         m = re.match(r"ws://([^:/]+):(\d+)", ws_url)
         host, port = (m.group(1), int(m.group(2))) if m else ("127.0.0.1", 0)
         for tgt in cdp_client.list_targets(port, host):
-            tid = tgt["targetId"]
+            # /json/list 的标识字段是 "id"；写成 "targetId" 会 KeyError，
+            # 而外层 except 会把它显示成"注入失败"，看不出真实原因。
+            tid = tgt.get("id") or tgt.get("targetId")
+            if not tid:
+                print(f"[!] 跳过没有 id 的 target：{sorted(tgt)}")
+                continue
             if tid in state["seen"]:
                 continue
             state["seen"].add(tid)
@@ -162,8 +200,11 @@ def run_cdp(args) -> int:
             at.enable_runtime()
             ptype = cdp_client.probe_process_type(conn, sid)
             if ptype == "browser":
-                at.evaluate(state["main_src"])
+                # 必须先登记 sid：模板在 evaluate 执行期间就同步回传 health，
+                # 而 on_console 用 main_sid 过滤——赋值晚一步这条消息就被丢掉，
+                # 随后健康检查超时，看起来像"模板没跑"。
                 state["main_sid"] = sid
+                at.evaluate(state["main_src"])
                 print(f"[*] 主进程已注入（target {tid[:12]}…）")
             else:
                 at.evaluate(state["renderer_src"])
@@ -191,6 +232,10 @@ def run_cdp(args) -> int:
         deadline = time.time() + args.timeout if args.timeout > 0 else None
         while True:
             time.sleep(1)
+            # 读线程死了就不能再说自己在监控 —— 这正是本通道要避免的失败模式
+            if not conn.alive:
+                print("[!] CDP 连接已断开（目标退出或端点关闭），监控停止。")
+                return 1
             try:
                 attach_and_inject()  # 渲染进程可能晚开（轮询补注入）
             except Exception:
@@ -203,10 +248,16 @@ def run_cdp(args) -> int:
         conn.close()
         if proc is not None and proc.poll() is None:
             print("[*] 目标进程仍在运行（由你启动，交还控制权）。")
+            print("[!] 注意：它的 --remote-debugging-port 仍然开着且无鉴权，"
+                  "本机任何进程都能在应用上下文执行 JS/Node —— 用完请结束该进程。")
     return 0
 
 
 def run_preload(args) -> int:
+    """preload 兜底通道：NODE_OPTIONS=--require 注入，必须等到 health 才算成功。
+
+    目标 Fuses 关闭 NodeOptions/RunAsNode 时脚本被静默忽略，此时返回 1 并说明原因。
+    """
     preload = TEMPLATES / "preload_monitor.cjs"
     if not preload.exists():
         print(f"[!] preload 模板缺失：{preload}")
@@ -224,6 +275,7 @@ def run_preload(args) -> int:
     state: dict = {"health": None}
 
     def _read_stdout() -> None:
+        """把目标 stdout 分成 __FPLINE__ 事件与应用自己的输出两路打印。"""
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip("\r\n")
@@ -247,6 +299,13 @@ def run_preload(args) -> int:
     if not _print_health_verdict(state["health"], "preload"):
         print("[!] 可能原因：目标 Fuses 已禁用 NodeOptions/RunAsNode（preload 被静默忽略）。"
               "改用 --channel cdp。")
+        # 目标由我们启动，判定失败后不要留下无人监管的进程
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         return 1
 
     print("[*] Monitoring Electron app... Press Ctrl+C to stop.\n")
@@ -261,6 +320,7 @@ def run_preload(args) -> int:
 
 
 def main() -> int:
+    """按 --channel 分派到 cdp（默认）或 preload 通道。"""
     parser = argparse.ArgumentParser(
         description="FridaPilot Electron Reverse Engineering Agent (H-T2 channels: CDP primary / preload fallback)")
     parser.add_argument("--app", help="Electron 可执行文件或应用目录（由 agent 启动目标）")

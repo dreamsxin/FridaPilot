@@ -218,8 +218,6 @@ def test_cli_examples_exist():
 @pytest.mark.parametrize("doc,source,line", CLI_LINES,
                          ids=[f"{d.name}: {ln[:60]}" for d, _s, ln in CLI_LINES])
 def test_cli_example_is_accepted_by_the_app(doc: Path, source: str, line: str):
-    import click
-
     tokens = shlex.split(line, posix=True)[1:]
     command = _click_root()
     root = command

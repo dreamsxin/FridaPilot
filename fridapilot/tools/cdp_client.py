@@ -18,6 +18,7 @@ import socket
 import struct
 import threading
 import urllib.request
+from collections import deque
 from typing import Any, Callable
 
 
@@ -43,6 +44,17 @@ class WebSocket:
         port = int(port_s) if port_s else 80
         self._sock = socket.create_connection((host, port), timeout=timeout)
         self._sock.settimeout(timeout)
+        try:
+            self._handshake(hostport, path)
+        except Exception:
+            # The socket is already connected at this point; leaking it here is how a
+            # retry loop runs out of file descriptors.
+            self._sock.close()
+            raise
+        self._send_lock = threading.Lock()
+
+    def _handshake(self, hostport: str, path: str) -> None:
+        """Send the RFC 6455 upgrade request and require a 101 response."""
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         req = (
             f"GET /{path} HTTP/1.1\r\n"
@@ -64,7 +76,16 @@ class WebSocket:
         if b" 101 " not in status:
             raise ConnectionError(f"websocket handshake failed: {status!r}")
         self._buf = bytearray(rest_data)
-        self._send_lock = threading.Lock()
+
+    def set_read_timeout(self, timeout: float | None) -> None:
+        """Change the socket timeout after the handshake.
+
+        A reader thread must block indefinitely: a timeout fires in the middle of a
+        frame, and frame-parse state (header consumed, payload not) cannot be resumed
+        from ``recv_message``, so the only safe options are "never time out" or "give
+        up". Idle CDP connections are normal, so the reader chooses the former.
+        """
+        self._sock.settimeout(timeout)
 
     @classmethod
     def from_socket(cls, sock: socket.socket) -> "WebSocket":
@@ -76,6 +97,7 @@ class WebSocket:
         return self
 
     def close(self) -> None:
+        """Close the socket, ignoring an already-dead connection."""
         try:
             self._sock.close()
         except Exception:
@@ -84,6 +106,7 @@ class WebSocket:
     # ── frames ──
 
     def _recv_exact(self, n: int) -> bytes:
+        """Read exactly n bytes, buffering whatever the socket hands over."""
         while len(self._buf) < n:
             chunk = self._sock.recv(65536)
             if not chunk:
@@ -94,6 +117,7 @@ class WebSocket:
         return out
 
     def _recv_frame(self) -> tuple[int, bytes]:
+        """One frame as (opcode | FIN bit, unmasked payload)."""
         b1, b2 = self._recv_exact(2)
         flags = b1
         opcode = b1 & 0x0F
@@ -110,6 +134,7 @@ class WebSocket:
         return (opcode | (0x80 if flags & 0x80 else 0)), payload
 
     def _send_frame(self, opcode: int, payload: bytes = b"", fin: bool = True) -> None:
+        """Send one client-masked frame (the RFC requires client masking)."""
         mask = os.urandom(4)
         header = bytes([(0x80 if fin else 0) | opcode])
         n = len(payload)
@@ -151,6 +176,7 @@ class WebSocket:
                 return (0x1 if text else 0x2), data
 
     def send_text(self, text: str) -> None:
+        """Send one UTF-8 text message."""
         self._send_frame(0x1, text.encode("utf-8"))
 
 
@@ -163,6 +189,10 @@ class CDPConnection:
 
     def __init__(self, ws_url: str, timeout: float = 15.0):
         self._ws = WebSocket(ws_url, timeout)
+        # The handshake needed a timeout; the reader must not have one. A DevTools
+        # endpoint is legitimately silent for minutes, and a timeout there killed the
+        # reader thread while the caller kept printing "Monitoring".
+        self._ws.set_read_timeout(None)
         self._timeout = timeout
         self._next_id = 1
         self._id_lock = threading.Lock()
@@ -174,9 +204,11 @@ class CDPConnection:
 
     @property
     def alive(self) -> bool:
+        """False once the reader thread has stopped - check before trusting events."""
         return self._alive
 
     def _read_loop(self) -> None:
+        """Route responses to their waiting call() and events to subscribers."""
         try:
             while self._alive:
                 op, raw = self._ws.recv_message()
@@ -203,6 +235,20 @@ class CDPConnection:
 
     def call(self, method: str, params: dict | None = None,
              session_id: str | None = None, timeout: float | None = None) -> dict:
+        """Send one command and wait for the response with the matching id.
+
+        Args:
+            session_id: target session for the flatten protocol (Target.attachToTarget
+                with flatten=True), omitted for browser-level commands.
+            timeout: seconds to wait; the connection default when None.
+
+        Returns:
+            The ``result`` object.
+
+        Raises:
+            TimeoutError: no response within the timeout.
+            RuntimeError: the endpoint answered with a CDP ``error``.
+        """
         with self._id_lock:
             mid = self._next_id
             self._next_id += 1
@@ -226,9 +272,11 @@ class CDPConnection:
         return resp.get("result", {})
 
     def on_event(self, prefix: str, cb: Callable[[dict], None]) -> None:
+        """Subscribe to events whose method equals or starts with ``prefix``."""
         self._handlers.append((prefix, cb))
 
     def close(self) -> None:
+        """Stop the reader thread and close the socket."""
         self._alive = False
         self._ws.close()
 
@@ -249,14 +297,21 @@ def wait_for_endpoint(port: int, host: str = "127.0.0.1",
     Works for Electron AND Chromium launchers that hand off to a child
     process (the stderr line is unreliable in the hand-off case).
     Returns the /json/version payload (contains webSocketDebuggerUrl).
+
+    A payload without ``webSocketDebuggerUrl`` is rejected: the port was picked by
+    asking the OS for a free one and then released, so an unrelated local service can
+    win the race and answer on it.
     """
     import time as _time
     deadline = _time.time() + timeout
     while _time.time() < deadline:
         try:
-            return fetch_json(f"http://{host}:{port}/json/version", timeout=2.0)
+            payload = fetch_json(f"http://{host}:{port}/json/version", timeout=2.0)
+            if isinstance(payload, dict) and payload.get("webSocketDebuggerUrl"):
+                return payload
         except Exception:
-            _time.sleep(0.2)
+            pass
+        _time.sleep(0.2)
     return None
 
 
@@ -269,27 +324,46 @@ def list_targets(port: int, host: str = "127.0.0.1") -> list[dict]:
 class AttachedTarget:
     """A CDP session bound to one target, with evaluate + console events."""
 
-    def __init__(self, conn: CDPConnection, target_id: str, session_id: str):
+    def __init__(self, conn: CDPConnection, target_id: str, session_id: str,
+                 max_console_events: int = 500):
         self.conn = conn
         self.target_id = target_id
         self.session_id = session_id
-        self.console_events: list[list[Any]] = []
+        # Bounded: a busy app emits console events forever, and an unbounded list on a
+        # long monitoring run is a slow memory leak.
+        self.console_events: deque[list[Any]] = deque(maxlen=max_console_events)
         conn.on_event("Runtime.consoleAPICalled", self._on_console)
 
     def enable_runtime(self) -> None:
+        """Enable the Runtime domain (required before evaluate / console events)."""
         self.conn.call("Runtime.enable", {}, session_id=self.session_id)
 
     def evaluate(self, expression: str, timeout: float | None = None) -> Any:
+        """Evaluate an expression in this target and return its value.
+
+        Raises RuntimeError when the script threw: CDP reports that in the response's
+        ``exceptionDetails``, so checking only ``result.subtype`` reports a failed
+        injection as success - the exact "pretending to monitor" failure this channel
+        exists to avoid.
+        """
         result = self.conn.call(
             "Runtime.evaluate",
             {"expression": expression, "returnByValue": True, "awaitPromise": False},
             session_id=self.session_id, timeout=timeout)
+        details = result.get("exceptionDetails")
+        if details:
+            exc = details.get("exception", {})
+            raise RuntimeError(exc.get("description")
+                               or details.get("text", "evaluate raised"))
         info = result.get("result", {})
         if info.get("subtype") == "error":
             raise RuntimeError(info.get("description", "evaluate failed"))
         return info.get("value")
 
     def _on_console(self, msg: dict) -> None:
+        """Record console args for THIS session only (handlers are connection-wide)."""
+        if msg.get("sessionId") != self.session_id:
+            return
         params = msg.get("params", {})
         values = [a.get("value", a.get("description", "")) for a in params.get("args", [])]
         self.console_events.append(values)
