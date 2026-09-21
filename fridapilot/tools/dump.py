@@ -44,9 +44,10 @@ def list_memory_regions(
     Returns:
         List of MemoryRegion with base, size, protection, and file path.
     """
+    prot_lit = protection.replace("'", "")
     script = session.create_script(f"""
         rpc.exports.getRegions = () => {{
-            return Process.enumerateRanges('{protection}').map(r => ({{
+            return Process.enumerateRanges('{prot_lit}').map(r => ({{
                 base: r.base.toString(),
                 size: r.size,
                 protection: r.protection,
@@ -54,9 +55,11 @@ def list_memory_regions(
             }}));
         }};
     """)
-    script.load()
-    regions = script.exports_sync.get_regions()
-    script.unload()
+    try:
+        script.load()
+        regions = script.exports_sync.get_regions()
+    finally:
+        script.unload()
     return [MemoryRegion(**r) for r in regions]
 
 
@@ -71,15 +74,18 @@ def dump_memory(session: frida.core.Session, address: str, size: int) -> DumpRes
     Returns:
         DumpResult with raw bytes, hex view, and ASCII preview.
     """
+    addr_lit = address.replace("\\", "\\\\").replace("'", "\\'")
     script = session.create_script(f"""
         rpc.exports.dump = () => {{
-            const buf = ptr('{address}').readByteArray({size});
+            const buf = ptr('{addr_lit}').readByteArray({size});
             return buf ? Array.from(new Uint8Array(buf)) : [];
         }};
     """)
-    script.load()
-    byte_array = script.exports_sync.dump()
-    script.unload()
+    try:
+        script.load()
+        byte_array = script.exports_sync.dump()
+    finally:
+        script.unload()
 
     data = bytes(byte_array) if byte_array else b""
     hex_view = _format_hex_view(data, address)
@@ -157,9 +163,11 @@ def dump_strings(
             return results;
         }};
     """)
-    script.load()
-    result = script.exports_sync.get_strings()
-    script.unload()
+    try:
+        script.load()
+        result = script.exports_sync.get_strings()
+    finally:
+        script.unload()
     return result
 
 
@@ -176,9 +184,10 @@ def dump_module_memory(
     Returns:
         DumpResult with the module's memory contents.
     """
+    name_lit = module_name.replace("\\", "\\\\").replace("'", "\\'")
     script = session.create_script(f"""
         rpc.exports.dumpModule = () => {{
-            const mod = Process.findModuleByName('{module_name}');
+            const mod = Process.findModuleByName('{name_lit}');
             if (!mod) return {{ error: 'Module not found', data: [] }};
             const capped = Math.min(mod.size, 10485760); // Max 10MB
             const buf = mod.base.readByteArray(capped);
@@ -191,9 +200,11 @@ def dump_module_memory(
             }};
         }};
     """)
-    script.load()
-    result = script.exports_sync.dump_module()
-    script.unload()
+    try:
+        script.load()
+        result = script.exports_sync.dump_module()
+    finally:
+        script.unload()
 
     if "error" in result:
         return DumpResult(address="0x0", size=0)

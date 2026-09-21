@@ -490,6 +490,8 @@ def bruteforce_key(
 
 def xor_deobfuscate(data: bytes, key: bytes) -> bytes:
     """XOR deobfuscate data with a repeating key."""
+    if not key:
+        raise ValueError("XOR key is empty")  # i % 0 would crash (audit L-C2)
     key_len = len(key)
     return bytes(b ^ key[i % key_len] for i, b in enumerate(data))
 

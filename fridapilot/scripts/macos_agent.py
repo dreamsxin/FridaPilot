@@ -27,7 +27,7 @@ def on_message(message: dict, data) -> None:
             print(f"  [Crypto] {p.get('op')} algo={p.get('algo')}")
         elif t == "network":
             print(f"  [Network] {p.get('api')} {p.get('method','')} {p.get('url','')}")
-        elif t == "process":
+        elif t in ("process", "exec"):
             print(f"  [Process] {p.get('api')} → {p.get('cmd','')}")
         elif t == "file":
             print(f"  [File] {p.get('op')} {p.get('path','')}")

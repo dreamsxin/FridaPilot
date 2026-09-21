@@ -42,6 +42,10 @@ def inject_cmd(
         if timeout > 0:
             console.print(f"[dim]Collecting messages for {timeout}s...[/dim]")
             time.sleep(timeout)
+            # Collected messages were silently dropped here (audit L-C7)
+            for msg in session.observer.messages:
+                console.print(f"  [{msg.type}] {msg.payload}")
+            session.observer.messages.clear()
         else:
             console.print("[dim]Collecting messages (Ctrl+C to stop)...[/dim]")
             while True:

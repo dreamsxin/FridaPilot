@@ -17,7 +17,15 @@ def get_anti_debug_script() -> str:
     """Get an anti-debug bypass Frida script (ptrace / svc)."""
     return """\
 // Anti-debug bypass: intercept ptrace
-Interceptor.attach(Module.findExportByName(null, 'ptrace'), {
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+const fpPtrace = (typeof Module.getGlobalExportByName === "function")
+    ? (() => { try { return Module.getGlobalExportByName("ptrace"); } catch (e) { return null; } })()
+    : Module.findExportByName(null, "ptrace");
+if (!fpPtrace) {
+    // No ptrace on this platform (e.g. Windows): skip instead of
+    // attach(undefined) killing the whole script (audit finding L-C4).
+    send({ type: 'bypass', detail: 'ptrace not present - anti-debug bypass skipped' });
+} else Interceptor.attach(fpPtrace, {
     onEnter(args) {
         this.request = args[0].toInt32();
     },

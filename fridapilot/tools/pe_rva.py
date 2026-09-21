@@ -24,6 +24,26 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+def _pe_cache_key(path) -> tuple[str, int, int] | None:
+    """Cache identity for a PEImage: resolved path + mtime + size.
+
+    None for unreadable paths (those are never cached).
+    """
+    try:
+        p = Path(path)
+        st = p.stat()
+        return (str(p.resolve()), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+# Bounded instance cache (audit finding L-P1): every public helper used
+# to construct its own PEImage, and each construction reads the WHOLE
+# file - one function_xrefs call re-read a 240MB binary three times and
+# vtable_of_function once per pointer-table hit. Keyed by content stamp
+# so an edited file can never be served stale; newest 4 kept.
+_PE_CACHE: dict[tuple[str, int, int], PEImage] = {}
+_PE_CACHE_ORDER: list[tuple[str, int, int]] = []
+
 # ModRM byte of a rip-relative operand: mod=00, rm=101, reg free -> 8 values.
 # A rip reference cannot be encoded any other way, which is what makes the
 # prefilter in _iter_rip_refs sound rather than heuristic.
@@ -42,8 +62,20 @@ class PEImage:
         img.in_file(0x10b2d260)        # False for uninitialized .data (BSS)
     """
 
+    def __new__(cls, path):
+        key = _pe_cache_key(path)
+        if key is not None:
+            cached = _PE_CACHE.get(key)
+            if cached is not None:
+                return cached
+        return super().__new__(cls)
+
     def __init__(self, path: str | Path):
         import pefile
+
+        key = _pe_cache_key(path)
+        if key is not None and _PE_CACHE.get(key) is self:
+            return  # served from the cache: already fully initialized
 
         self.path = str(path)
         self._pe = pefile.PE(self.path, fast_load=True)
@@ -62,6 +94,14 @@ class PEImage:
             self._section_flags[name] = s.Characteristics
         with open(self.path, "rb") as f:
             self._data = f.read()
+
+        if key is not None:
+            _PE_CACHE[key] = self
+            _PE_CACHE_ORDER.append(key)
+            while len(_PE_CACHE_ORDER) > 4:
+                old = _PE_CACHE_ORDER.pop(0)
+                if old != key:
+                    _PE_CACHE.pop(old, None)
 
     # ── address mapping ──
     def rva_to_off(self, rva: int) -> int | None:
@@ -273,6 +313,9 @@ def find_string_rvas(
     out: list[dict[str, Any]] = []
     for needle in needles:
         pat = needle.encode("utf-8") if encoding == "ascii" else needle.encode("utf-16-le")
+        # Report the codec actually used: the "ascii" spelling encodes
+        # UTF-8, so a non-ASCII needle must not be mislabeled (audit L-P3).
+        codec = "utf-16-le" if encoding != "ascii" else "utf-8"
         start = 0
         found = 0
         while True:
@@ -284,7 +327,7 @@ def find_string_rvas(
             codec = "utf-8" if encoding == "ascii" else "utf-16-le"
             out.append({
                 "needle": needle, "offset": idx,
-                "rva": rva, "encoding": encoding,
+                "rva": rva, "encoding": codec,
                 "section": img.section_of(rva) if rva is not None else "",
                 "whole": whole,
                 "enclosing": raw.decode(codec, "replace") if raw is not None else None,
@@ -292,7 +335,7 @@ def find_string_rvas(
             found += 1
             start = idx + 1
         if found == 0:
-            out.append({"needle": needle, "offset": None, "rva": None, "encoding": encoding,
+            out.append({"needle": needle, "offset": None, "rva": None, "encoding": codec,
                         "section": "", "whole": False, "enclosing": None})
     return out
 
@@ -748,7 +791,7 @@ def field_refs(
     out: list[dict[str, Any]] = []
     n = len(data)
     covered_until = 0          # drop candidates that start inside an accepted instruction
-    for i in range(n - 11):
+    for i in range(n - 7):
         if i < covered_until:
             continue
         hit = _classify(i)
@@ -1127,7 +1170,13 @@ def _resolve_scan_range(
                 hi if scan_end_rva is None else scan_end_rva, section)
 
     if scan_start_rva is None or scan_end_rva is None:
-        anchor = scan_start_rva if scan_start_rva is not None else scan_end_rva
+        if scan_start_rva is not None:
+            anchor = scan_start_rva
+        else:
+            # Anchor one byte below the end: an end RVA that coincides
+            # with the next section's start would otherwise resolve to
+            # the wrong section and yield an empty scan (audit L-P5).
+            anchor = scan_end_rva - 1 if scan_end_rva else scan_end_rva
         name = (img.section_of(anchor) if anchor is not None else None) or default_section
         found = img.section_range(name) or img.section_range(default_section)
         if found is None:
@@ -1295,7 +1344,9 @@ def xrefs_to_rva(
     # instruction itself, so there is no fixed pattern to search for and the byte walk
     # stays. Skipped entirely when only absolute kinds were asked for.
     if want & {"call", "jmp"}:
-        for i in range(n - 9):
+        # rel32 needs bytes i..i+4, so i <= n-5 (the old n-9 silently
+        # skipped the last five bytes of the section - audit L-P2).
+        for i in range(n - 4):
             b0 = data[i]
 
             # ── direct call / jmp rel32 ──

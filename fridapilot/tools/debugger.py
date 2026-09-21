@@ -124,8 +124,9 @@ rpc.exports = {
                          : ctx.pc;
                 let disasm = [];
                 try {
-                    disasm = Instruction.parse(pc) ? [pc.toString() + ': ' + Instruction.parse(pc).toString()] : [];
-                    let cur = pc;
+                    const first = Instruction.parse(pc);
+                    disasm = [pc.toString() + ': ' + first.toString()];
+                    let cur = pc.add(first.size);
                     for (let i = 0; i < 5; i++) {
                         const insn = Instruction.parse(cur);
                         if (!insn) break;

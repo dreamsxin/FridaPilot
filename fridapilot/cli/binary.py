@@ -395,7 +395,7 @@ def analyze_cmd(
 
         info = Table(show_header=False)
         info.add_row("Machine", pe_result.machine)
-        info.add_row("Arch", "x64" if pe_result.is_64bit else "x86")
+        info.add_row("Arch", pe_result.machine)
         info.add_row("Type", "DLL" if pe_result.is_dll else "EXE")
         info.add_row(".NET", "Yes" if pe_result.is_dotnet else "No")
         info.add_row("Entry Point", f"0x{pe_result.entry_point:x}")

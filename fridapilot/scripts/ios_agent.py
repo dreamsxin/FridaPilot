@@ -27,7 +27,7 @@ def on_message(message: dict, data) -> None:
             print(f"  [Crypto] {p.get('op')} algo={p.get('algo')}")
         elif t == "network":
             print(f"  [Network] {p.get('api')} {p.get('method','')} {p.get('url','')}")
-        elif t == "lifecycle":
+        elif t in ("lifecycle", "viewcontroller"):
             print(f"  [Lifecycle] {p.get('method')} → {p.get('class','')}")
         elif t == "bypass":
             print(f"  [Bypass] {p.get('detail')}")

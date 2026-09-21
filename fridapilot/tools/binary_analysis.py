@@ -66,7 +66,7 @@ def analyze_pe(filepath: str | Path) -> PEAnalysis:
     pe = pefile.PE(str(filepath), fast_load=False)
 
     result = PEAnalysis(filepath=str(filepath))
-    result.is_64bit = pe.FILE_HEADER.Machine == 0x8664
+    result.is_64bit = pe.FILE_HEADER.Machine in (0x8664, 0xAA64)
     result.is_dll = bool(pe.FILE_HEADER.Characteristics & 0x2000)
     result.machine = {
         0x14C: "i386", 0x8664: "AMD64", 0xAA64: "ARM64",
@@ -204,7 +204,10 @@ def disassemble(
             pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
             if pe_offset + 6 < len(data) and data[pe_offset:pe_offset + 4] == b"PE\x00\x00":
                 machine = struct.unpack_from("<H", data, pe_offset + 4)[0]
-                arch = "x64" if machine == 0x8664 else "x86"
+                if machine == 0xAA64:
+                    arch = "arm64"
+                else:
+                    arch = "x64" if machine == 0x8664 else "x86"
             else:
                 arch = "x86"
         elif data[:4] == b"\x7fELF":
@@ -223,6 +226,7 @@ def disassemble(
         "x86": (capstone.CS_ARCH_X86, capstone.CS_MODE_32),
         "x64": (capstone.CS_ARCH_X86, capstone.CS_MODE_64),
         "arm": (capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM),
+        "arm64": (capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM),
         "arm64": (capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM),
     }
     cs_arch, cs_mode = arch_map.get(arch, (capstone.CS_ARCH_X86, capstone.CS_MODE_64))
