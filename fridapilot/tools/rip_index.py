@@ -235,6 +235,7 @@ def lookup_rip_refs(
     target_rva: int,
     scan_start_rva: int | None = None,
     scan_end_rva: int | None = None,
+    scan_gaps: bool = True,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]] | None:
     """Rip references to ``target_rva`` from the index, or None if not covered.
@@ -251,6 +252,11 @@ def lookup_rip_refs(
     if info["index_version"] != INDEX_VERSION:
         logger.info("rip index for %s is version %d, current is %d - rebuilding needed",
                     Path(binary_path).name, info["index_version"], INDEX_VERSION)
+        return None
+    if not scan_gaps and info["scan_gaps"]:
+        # The index was built with gap scanning (pass B). Serving it to a
+        # strict .pdata-only query would silently violate the strict-mode
+        # contract (audit finding H-P1) - refuse and let the caller scan.
         return None
     if scan_start_rva is not None and scan_start_rva < info["scan_start_rva"]:
         return None

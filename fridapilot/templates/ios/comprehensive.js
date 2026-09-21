@@ -1,7 +1,22 @@
 // iOS 全面逆向分析脚本 - ViewController/Keychain/网络/越狱检测
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
 // FridaPilot - iOS Comprehensive Reverse Engineering
 
-if (ObjC.available) {
+if (typeof ObjC !== "undefined" && ObjC.available) {
     console.log('[FridaPilot] iOS Reverse Engineering Script Loaded');
 
     // ══════════════════════════════════════════
@@ -26,10 +41,10 @@ if (ObjC.available) {
     // 2. Keychain 读写监控
     // ══════════════════════════════════════════
     try {
-        Interceptor.attach(Module.findExportByName('Security','SecItemAdd'), {
+        Interceptor.attach(fpFindExport('Security','SecItemAdd'), {
             onEnter(args) { send({ type: 'keychain', op: 'SecItemAdd' }); }
         });
-        Interceptor.attach(Module.findExportByName('Security','SecItemCopyMatching'), {
+        Interceptor.attach(fpFindExport('Security','SecItemCopyMatching'), {
             onEnter(args) { send({ type: 'keychain', op: 'SecItemCopyMatching' }); },
             onLeave(retval) {
                 send({ type: 'keychain', op: 'SecItemCopyMatching', result: retval.toInt32() });
@@ -59,7 +74,7 @@ if (ObjC.available) {
     // 4. CommonCrypto 监控
     // ══════════════════════════════════════════
     try {
-        Interceptor.attach(Module.findExportByName('libcommonCrypto.dylib','CCCrypt'), {
+        Interceptor.attach(fpFindExport('libcommonCrypto.dylib','CCCrypt'), {
             onEnter(args) {
                 send({
                     type: 'crypto', api: 'CCCrypt',

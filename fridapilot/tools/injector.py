@@ -22,6 +22,7 @@ class Session:
     pid: int
     target: str
     device_type: DeviceType
+    spawned: bool = False
     scripts: list[frida.core.Script] = field(default_factory=list)
     observer: Observer = field(default_factory=Observer)
 
@@ -59,8 +60,14 @@ def spawn(
     package: str,
     device_type: DeviceType = DeviceType.LOCAL,
     host: str = "",
+    resume: bool = False,
 ) -> Session:
-    """Spawn an application and attach."""
+    """Spawn an application and attach.
+
+    The process stays suspended by default so hooks can be injected before
+    the app runs; call resume() (or `fp resume`) afterwards, or pass
+    resume=True to let it run immediately.
+    """
     device = get_device(device_type, host)
     pid = device.spawn([package])
     frida_session = device.attach(pid)
@@ -69,7 +76,11 @@ def spawn(
         pid=pid,
         target=package,
         device_type=device_type,
+        spawned=True,
     )
+    if resume:
+        device.resume(pid)
+        session.spawned = False
     return session
 
 

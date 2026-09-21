@@ -1,4 +1,19 @@
 // Windows 全面逆向分析脚本 - BCrypt/CryptoAPI/注册表/文件/网络/反调试
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
 // FridaPilot - Windows Comprehensive Reverse Engineering
 
 console.log('[FridaPilot] Windows Reverse Engineering Script Loaded');
@@ -6,11 +21,11 @@ console.log('[FridaPilot] Windows Reverse Engineering Script Loaded');
 // ══════════════════════════════════════════
 // 1. BCrypt 加密 API 监控
 // ══════════════════════════════════════════
-var bcrypt = Module.findModuleByName('bcrypt.dll');
+var bcrypt = fpFindModule('bcrypt.dll');
 if (bcrypt) {
     ['BCryptEncrypt','BCryptDecrypt','BCryptGenerateSymmetricKey',
      'BCryptOpenAlgorithmProvider','BCryptDeriveKeyPBKDF2'].forEach(fn => {
-        var addr = Module.findExportByName('bcrypt.dll', fn);
+        var addr = fpFindExport('bcrypt.dll', fn);
         if (addr) {
             Interceptor.attach(addr, {
                 onEnter(args) { this.fn = fn; this.args = args; },
@@ -26,7 +41,7 @@ if (bcrypt) {
 // 2. 注册表操作监控
 // ══════════════════════════════════════════
 ['RegOpenKeyExW','RegQueryValueExW','RegSetValueExW','RegCreateKeyExW'].forEach(fn => {
-    var addr = Module.findExportByName('advapi32.dll', fn);
+    var addr = fpFindExport('advapi32.dll', fn);
     if (addr) {
         Interceptor.attach(addr, {
             onEnter(args) {
@@ -41,7 +56,7 @@ if (bcrypt) {
 // ══════════════════════════════════════════
 // 3. 文件操作监控
 // ══════════════════════════════════════════
-var createFileW = Module.findExportByName('kernel32.dll', 'CreateFileW');
+var createFileW = fpFindExport('kernel32.dll', 'CreateFileW');
 if (createFileW) {
     Interceptor.attach(createFileW, {
         onEnter(args) {
@@ -57,9 +72,9 @@ if (createFileW) {
 // ══════════════════════════════════════════
 // 4. 网络连接监控
 // ══════════════════════════════════════════
-var ws2 = Module.findModuleByName('ws2_32.dll');
+var ws2 = fpFindModule('ws2_32.dll');
 if (ws2) {
-    var connectAddr = Module.findExportByName('ws2_32.dll', 'connect');
+    var connectAddr = fpFindExport('ws2_32.dll', 'connect');
     if (connectAddr) {
         Interceptor.attach(connectAddr, {
             onEnter(args) {
@@ -75,7 +90,7 @@ if (ws2) {
     }
 
     // WinHTTP
-    var httpOpen = Module.findExportByName('winhttp.dll', 'WinHttpOpenRequest');
+    var httpOpen = fpFindExport('winhttp.dll', 'WinHttpOpenRequest');
     if (httpOpen) {
         Interceptor.attach(httpOpen, {
             onEnter(args) {
@@ -91,7 +106,7 @@ if (ws2) {
 // ══════════════════════════════════════════
 // 5. 反调试检测监控
 // ══════════════════════════════════════════
-var isDebugger = Module.findExportByName('kernel32.dll', 'IsDebuggerPresent');
+var isDebugger = fpFindExport('kernel32.dll', 'IsDebuggerPresent');
 if (isDebugger) {
     Interceptor.attach(isDebugger, {
         onLeave(retval) {
@@ -101,7 +116,7 @@ if (isDebugger) {
     });
 }
 
-var ntQueryInfo = Module.findExportByName('ntdll.dll', 'NtQueryInformationProcess');
+var ntQueryInfo = fpFindExport('ntdll.dll', 'NtQueryInformationProcess');
 if (ntQueryInfo) {
     Interceptor.attach(ntQueryInfo, {
         onEnter(args) {

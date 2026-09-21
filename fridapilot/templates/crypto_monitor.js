@@ -1,7 +1,7 @@
 // Crypto Monitor - Monitor common cryptographic API calls
 // Logs algorithm, key material, and input/output data
 
-if (Java && Java.available) {
+if (typeof Java !== "undefined" && Java.available) {
     Java.perform(() => {
         // javax.crypto.Cipher
         try {

@@ -1,7 +1,7 @@
 // Android 全面逆向分析脚本 - Activity/Service/加密/网络/Root检测
 // FridaPilot - Android Comprehensive Reverse Engineering
 
-Java.perform(() => {
+if (typeof Java !== "undefined" && Java.available) Java.perform(() => {
     console.log('[FridaPilot] Android Reverse Engineering Script Loaded');
 
     // ══════════════════════════════════════════

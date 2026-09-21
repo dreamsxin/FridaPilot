@@ -1255,7 +1255,8 @@ def xrefs_to_rva(
         if use_index:
             from fridapilot.tools.rip_index import lookup_rip_refs
             cached = lookup_rip_refs(binary_path, target_rva,
-                                     scan_start_rva, scan_end_rva)
+                                     scan_start_rva, scan_end_rva,
+                                     scan_gaps=scan_gaps)
         if cached is not None:
             # Served from the persistent index, which only answers queries inside
             # the range and target sections it recorded (see rip_index).

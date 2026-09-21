@@ -1,4 +1,19 @@
 // Windows 加固绕过脚本 - VMProtect/Themida/反调试/完整性检查/反篡改
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
 // FridaPilot - Windows Hardening Bypass
 
 console.log('[FridaPilot] Windows Hardening Bypass Loaded');
@@ -8,7 +23,7 @@ console.log('[FridaPilot] Windows Hardening Bypass Loaded');
 // ══════════════════════════════════════════
 
 // IsDebuggerPresent
-var isDbg = Module.findExportByName('kernel32.dll', 'IsDebuggerPresent');
+var isDbg = fpFindExport('kernel32.dll', 'IsDebuggerPresent');
 if (isDbg) {
     Interceptor.attach(isDbg, {
         onLeave(retval) {
@@ -19,7 +34,7 @@ if (isDbg) {
 }
 
 // CheckRemoteDebuggerPresent
-var checkRemote = Module.findExportByName('kernel32.dll', 'CheckRemoteDebuggerPresent');
+var checkRemote = fpFindExport('kernel32.dll', 'CheckRemoteDebuggerPresent');
 if (checkRemote) {
     Interceptor.attach(checkRemote, {
         onEnter(args) { this.pDebugger = args[1]; },
@@ -31,7 +46,7 @@ if (checkRemote) {
 }
 
 // NtQueryInformationProcess (多种InfoClass)
-var ntQuery = Module.findExportByName('ntdll.dll', 'NtQueryInformationProcess');
+var ntQuery = fpFindExport('ntdll.dll', 'NtQueryInformationProcess');
 if (ntQuery) {
     Interceptor.attach(ntQuery, {
         onEnter(args) {
@@ -60,7 +75,7 @@ if (ntQuery) {
 }
 
 // NtSetInformationThread (ThreadHideFromDebugger)
-var ntSetThread = Module.findExportByName('ntdll.dll', 'NtSetInformationThread');
+var ntSetThread = fpFindExport('ntdll.dll', 'NtSetInformationThread');
 if (ntSetThread) {
     Interceptor.attach(ntSetThread, {
         onEnter(args) {
@@ -73,7 +88,7 @@ if (ntSetThread) {
 }
 
 // OutputDebugStringA timing check
-var outputDbgStr = Module.findExportByName('kernel32.dll', 'OutputDebugStringA');
+var outputDbgStr = fpFindExport('kernel32.dll', 'OutputDebugStringA');
 if (outputDbgStr) {
     Interceptor.attach(outputDbgStr, {
         onEnter(args) {
@@ -112,7 +127,7 @@ try {
 // 3. 时间戳反调试绕过
 // ══════════════════════════════════════════
 // QueryPerformanceCounter / GetTickCount manipulation
-var qpc = Module.findExportByName('kernel32.dll', 'QueryPerformanceCounter');
+var qpc = fpFindExport('kernel32.dll', 'QueryPerformanceCounter');
 if (qpc) {
     var qpcCallCount = 0;
     Interceptor.attach(qpc, {
@@ -130,7 +145,7 @@ if (qpc) {
 // 4. 完整性检查绕过
 // ══════════════════════════════════════════
 // Hook CreateFileW for integrity check files
-var createFileW = Module.findExportByName('kernel32.dll', 'CreateFileW');
+var createFileW = fpFindExport('kernel32.dll', 'CreateFileW');
 if (createFileW) {
     Interceptor.attach(createFileW, {
         onEnter(args) {
@@ -147,7 +162,7 @@ if (createFileW) {
 // 5. 进程环境检测绕过 (VM/Sandbox)
 // ══════════════════════════════════════════
 // GetSystemFirmwareTable (SMBIOS check)
-var getFirmware = Module.findExportByName('kernel32.dll', 'GetSystemFirmwareTable');
+var getFirmware = fpFindExport('kernel32.dll', 'GetSystemFirmwareTable');
 if (getFirmware) {
     Interceptor.attach(getFirmware, {
         onEnter(args) {

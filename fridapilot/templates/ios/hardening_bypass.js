@@ -1,7 +1,22 @@
 // iOS 加固绕过脚本 - 越狱检测/Frida检测/代码签名/SSL Pinning增强/反调试
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
 // FridaPilot - iOS Hardening Bypass
 
-if (ObjC.available) {
+if (typeof ObjC !== "undefined" && ObjC.available) {
     console.log('[FridaPilot] iOS Hardening Bypass Loaded');
 
     // ══════════════════════════════════════════
@@ -34,7 +49,7 @@ if (ObjC.available) {
     // 1b. C-level access/stat/open
     ['access', 'stat', 'lstat', 'open'].forEach(fn => {
         try {
-            Interceptor.attach(Module.findExportByName(null, fn), {
+            Interceptor.attach(fpFindExport(null, fn), {
                 onEnter(args) {
                     this.path = args[0].readUtf8String();
                 },
@@ -66,7 +81,7 @@ if (ObjC.available) {
 
     // 1d. fork() check (jailbroken devices can fork)
     try {
-        Interceptor.attach(Module.findExportByName(null, 'fork'), {
+        Interceptor.attach(fpFindExport(null, 'fork'), {
             onLeave(retval) {
                 send({ type: 'jb_bypass', method: 'fork', detail: 'returning -1' });
                 retval.replace(ptr(-1));
@@ -80,7 +95,7 @@ if (ObjC.available) {
 
     // 2a. 端口扫描检测 (27042)
     try {
-        Interceptor.attach(Module.findExportByName(null, 'connect'), {
+        Interceptor.attach(fpFindExport(null, 'connect'), {
             onEnter(args) {
                 var sockaddr = args[1];
                 var family = sockaddr.readU16();
@@ -99,7 +114,7 @@ if (ObjC.available) {
 
     // 2b. dyld 镜像名检测
     try {
-        var _dyld_get_image_name = Module.findExportByName(null, '_dyld_get_image_name');
+        var _dyld_get_image_name = fpFindExport(null, '_dyld_get_image_name');
         Interceptor.attach(_dyld_get_image_name, {
             onLeave(retval) {
                 var name = retval.readUtf8String();
@@ -113,7 +128,7 @@ if (ObjC.available) {
 
     // 2c. strstr 隐藏 frida 字符串
     try {
-        Interceptor.attach(Module.findExportByName(null, 'strstr'), {
+        Interceptor.attach(fpFindExport(null, 'strstr'), {
             onEnter(args) { this.needle = args[1].readCString(); },
             onLeave(retval) {
                 if (this.needle && ['frida', 'LIBFRIDA', 'gum-js-loop', 'gmain'].some(k => this.needle.includes(k))) {
@@ -128,7 +143,7 @@ if (ObjC.available) {
     // ══════════════════════════════════════════
     // sysctl 检测
     try {
-        Interceptor.attach(Module.findExportByName(null, 'sysctl'), {
+        Interceptor.attach(fpFindExport(null, 'sysctl'), {
             onEnter(args) {
                 this.mib = args[0];
                 this.size = args[1].readU32();
@@ -155,7 +170,7 @@ if (ObjC.available) {
 
     // ptrace
     try {
-        Interceptor.attach(Module.findExportByName(null, 'ptrace'), {
+        Interceptor.attach(fpFindExport(null, 'ptrace'), {
             onEnter(args) { this.req = args[0].toInt32(); },
             onLeave(retval) {
                 if (this.req === 31) { // PT_DENY_ATTACH

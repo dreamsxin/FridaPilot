@@ -1,7 +1,7 @@
 // Java Hook Template - Hook a Java method and log arguments + return value
 // Variables: {{class_name}}, {{method_name}}
 
-Java.perform(() => {
+if (typeof Java !== "undefined" && Java.available) Java.perform(() => {
     const cls = Java.use('{{class_name}}');
     cls['{{method_name}}'].overload().implementation = function() {
         const args = Array.from(arguments);

@@ -150,3 +150,18 @@ def test_indexed_targets_are_data_rvas(pe_and_db):
     info = rip_index.index_info(path, db_path=db)
     assert all(lo >= RDATA_RVA or name != ".text"
                for lo, _hi, name in info["target_ranges"])
+
+
+def test_strict_mode_never_reads_a_gap_index(pe_and_db):
+    """Regression for audit H-P1: a gap-scanning index must not serve
+    strict (scan_gaps=False) queries - the strict result must equal a
+    fresh strict scan even when a covering index exists."""
+    path, db = pe_and_db
+    strict_scanned = {r["from_rva"] for r in xrefs_to_rva(
+        path, TARGET_RVA, TEXT_RVA, TEXT_RVA + TEXT_VSIZE, kinds=("rip",),
+        scan_gaps=False, use_index=False)}
+    rip_index.build_rip_index(path, db_path=db)
+    strict_indexed = {r["from_rva"] for r in xrefs_to_rva(
+        path, TARGET_RVA, TEXT_RVA, TEXT_RVA + TEXT_VSIZE, kinds=("rip",),
+        scan_gaps=False, use_index=True)}
+    assert strict_indexed == strict_scanned

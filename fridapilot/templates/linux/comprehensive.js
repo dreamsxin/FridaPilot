@@ -1,4 +1,19 @@
 // Linux 全面逆向分析脚本 - 系统调用/文件/网络/加密/ptrace
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
 // FridaPilot - Linux Comprehensive Reverse Engineering
 
 console.log('[FridaPilot] Linux Reverse Engineering Script Loaded');
@@ -6,7 +21,7 @@ console.log('[FridaPilot] Linux Reverse Engineering Script Loaded');
 // ══════════════════════════════════════════
 // 1. 文件操作监控
 // ══════════════════════════════════════════
-Interceptor.attach(Module.findExportByName(null, 'open'), {
+Interceptor.attach(fpFindExport(null, 'open'), {
     onEnter(args) {
         this.path = args[0].readUtf8String();
         this.flags = args[1].toInt32();
@@ -17,7 +32,7 @@ Interceptor.attach(Module.findExportByName(null, 'open'), {
 });
 
 try {
-    Interceptor.attach(Module.findExportByName(null, 'openat'), {
+    Interceptor.attach(fpFindExport(null, 'openat'), {
         onEnter(args) {
             this.path = args[1].readUtf8String();
         },
@@ -30,7 +45,7 @@ try {
 // ══════════════════════════════════════════
 // 2. 网络连接监控
 // ══════════════════════════════════════════
-Interceptor.attach(Module.findExportByName(null, 'connect'), {
+Interceptor.attach(fpFindExport(null, 'connect'), {
     onEnter(args) {
         var sockaddr = args[1];
         var family = sockaddr.readU16();
@@ -47,7 +62,7 @@ Interceptor.attach(Module.findExportByName(null, 'connect'), {
 
 // DNS
 try {
-    Interceptor.attach(Module.findExportByName(null, 'getaddrinfo'), {
+    Interceptor.attach(fpFindExport(null, 'getaddrinfo'), {
         onEnter(args) {
             send({ type: 'dns', host: args[0].readUtf8String(), service: args[1].isNull() ? '' : args[1].readUtf8String() });
         }
@@ -57,14 +72,14 @@ try {
 // ══════════════════════════════════════════
 // 3. 进程/命令执行
 // ══════════════════════════════════════════
-Interceptor.attach(Module.findExportByName(null, 'execve'), {
+Interceptor.attach(fpFindExport(null, 'execve'), {
     onEnter(args) {
         send({ type: 'exec', op: 'execve', path: args[0].readUtf8String() });
     }
 });
 
 try {
-    Interceptor.attach(Module.findExportByName(null, 'system'), {
+    Interceptor.attach(fpFindExport(null, 'system'), {
         onEnter(args) {
             send({ type: 'exec', op: 'system', cmd: args[0].readUtf8String() });
         }
@@ -76,7 +91,7 @@ try {
 // ══════════════════════════════════════════
 ['libssl.so', 'libssl.so.3', 'libssl.so.1.1'].forEach(lib => {
     try {
-        var sslWrite = Module.findExportByName(lib, 'SSL_write');
+        var sslWrite = fpFindExport(lib, 'SSL_write');
         if (sslWrite) {
             Interceptor.attach(sslWrite, {
                 onEnter(args) {
@@ -85,7 +100,7 @@ try {
                 }
             });
         }
-        var sslRead = Module.findExportByName(lib, 'SSL_read');
+        var sslRead = fpFindExport(lib, 'SSL_read');
         if (sslRead) {
             Interceptor.attach(sslRead, {
                 onEnter(args) { this.buf = args[1]; this.size = args[2].toInt32(); },
@@ -105,7 +120,7 @@ try {
 // 5. ptrace 反调试绕过
 // ══════════════════════════════════════════
 try {
-    Interceptor.attach(Module.findExportByName(null, 'ptrace'), {
+    Interceptor.attach(fpFindExport(null, 'ptrace'), {
         onEnter(args) {
             this.request = args[0].toInt32();
         },
@@ -121,7 +136,7 @@ try {
 // ══════════════════════════════════════════
 // 6. dlopen 动态加载监控
 // ══════════════════════════════════════════
-Interceptor.attach(Module.findExportByName(null, 'dlopen'), {
+Interceptor.attach(fpFindExport(null, 'dlopen'), {
     onEnter(args) {
         if (!args[0].isNull()) {
             send({ type: 'dlopen', path: args[0].readUtf8String() });

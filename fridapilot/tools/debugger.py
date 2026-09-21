@@ -192,7 +192,7 @@ rpc.exports = {
     // ── Memory Access ──
 
     readMemory(addrStr, size) {
-        const buf = Memory.readByteArray(ptr(addrStr), size);
+        const buf = ptr(addrStr).readByteArray(size);
         if (!buf) return '';
         return Array.from(new Uint8Array(buf)).map(b => ('0'+b.toString(16)).slice(-2)).join('');
     },
@@ -203,16 +203,19 @@ rpc.exports = {
         for (let i = 0; i < hexData.length; i += 2) {
             bytes.push(parseInt(hexData.substr(i, 2), 16));
         }
+        let oldProt = 'rw-';
+        try { oldProt = Memory.queryProtection(addr); } catch (e) {}
         Memory.protect(addr, bytes.length, 'rwx');
-        Memory.writeByteArray(addr, bytes);
+        addr.writeByteArray(bytes);
+        try { Memory.protect(addr, bytes.length, oldProt); } catch (e) {}
         return bytes.length;
     },
 
     readString(addrStr, maxLen) {
         try {
-            return Memory.readUtf8String(ptr(addrStr), maxLen || 256);
+            return ptr(addrStr).readUtf8String(maxLen || 256);
         } catch(e) {
-            try { return Memory.readUtf16String(ptr(addrStr), maxLen || 256); }
+            try { return ptr(addrStr).readUtf16String(maxLen || 256); }
             catch(e2) { return '<unreadable>'; }
         }
     },
@@ -241,7 +244,17 @@ rpc.exports = {
     // ── Symbol Resolution ──
 
     resolveSymbol(moduleStr, exportStr) {
-        const addr = Module.findExportByName(moduleStr, exportStr);
+        let addr = null;
+        if (typeof Module.getGlobalExportByName === "function") {
+            const mod = moduleStr ? Process.findModuleByName(moduleStr) : null;
+            if (mod) {
+                addr = mod.findExportByName(exportStr);
+            } else {
+                try { addr = Module.getGlobalExportByName(exportStr); } catch (e) { addr = null; }
+            }
+        } else {
+            addr = Module.findExportByName(moduleStr, exportStr);
+        }
         return addr ? addr.toString() : null;
     },
 
@@ -265,7 +278,14 @@ rpc.exports = {
     },
 
     getExports(moduleName) {
-        return Module.enumerateExports(moduleName).slice(0, 200).map(e => ({
+        const mod = (typeof Process.findModuleByName === "function")
+            ? Process.findModuleByName(moduleName)
+            : null;
+        if (!mod) return [];
+        const exports = (typeof mod.enumerateExports === "function")
+            ? mod.enumerateExports()
+            : Module.enumerateExports(moduleName);
+        return exports.slice(0, 200).map(e => ({
             name: e.name, address: e.address.toString(), type: e.type
         }));
     },

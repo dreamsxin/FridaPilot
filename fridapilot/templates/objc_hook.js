@@ -1,7 +1,7 @@
 // ObjC Hook Template - Hook an Objective-C method
 // Variables: {{class_name}}, {{method_name}}
 
-if (ObjC.available) {
+if (typeof ObjC !== "undefined" && ObjC.available) {
     const cls = ObjC.classes['{{class_name}}'];
     if (cls && cls['{{method_name}}']) {
         Interceptor.attach(cls['{{method_name}}'].implementation, {

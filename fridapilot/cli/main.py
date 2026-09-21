@@ -33,7 +33,7 @@ def main(
 # ── Subcommands ──────────────────────────────────────────────
 
 from fridapilot.cli.ps import ps_cmd
-from fridapilot.cli.attach import attach_cmd, spawn_cmd, detach_cmd
+from fridapilot.cli.attach import attach_cmd, spawn_cmd, detach_cmd, resume_cmd
 from fridapilot.cli.inject import inject_cmd
 from fridapilot.cli.recon import recon_app
 from fridapilot.cli.template import template_cmd
@@ -51,6 +51,7 @@ from fridapilot.cli.run import run_cmd
 app.command("ps")(ps_cmd)
 app.command("attach")(attach_cmd)
 app.command("spawn")(spawn_cmd)
+app.command("resume")(resume_cmd)
 app.command("detach")(detach_cmd)
 app.command("inject")(inject_cmd)
 app.add_typer(recon_app, name="recon", help="Enumerate modules, classes, methods, exports.")

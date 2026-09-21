@@ -1,14 +1,29 @@
 // macOS 全面逆向分析脚本 - Keychain/网络/权限/签名/系统调用
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
 // FridaPilot - macOS Comprehensive Reverse Engineering
 
-if (ObjC.available) {
+if (typeof ObjC !== "undefined" && ObjC.available) {
     console.log('[FridaPilot] macOS Reverse Engineering Script Loaded');
 
     // ══════════════════════════════════════════
     // 1. Keychain 操作监控
     // ══════════════════════════════════════════
     ['SecItemAdd','SecItemCopyMatching','SecItemUpdate','SecItemDelete'].forEach(fn => {
-        var addr = Module.findExportByName('Security', fn);
+        var addr = fpFindExport('Security', fn);
         if (addr) {
             Interceptor.attach(addr, {
                 onEnter(args) {
@@ -71,7 +86,7 @@ if (ObjC.available) {
     } catch(e) {}
 
     // open() syscall
-    var openFunc = Module.findExportByName('libSystem.B.dylib', 'open');
+    var openFunc = fpFindExport('libSystem.B.dylib', 'open');
     if (openFunc) {
         Interceptor.attach(openFunc, {
             onEnter(args) {
@@ -83,7 +98,7 @@ if (ObjC.available) {
     // ══════════════════════════════════════════
     // 5. 代码签名检查
     // ══════════════════════════════════════════
-    var csOps = Module.findExportByName(null, 'csops');
+    var csOps = fpFindExport(null, 'csops');
     if (csOps) {
         Interceptor.attach(csOps, {
             onEnter(args) {
@@ -95,7 +110,7 @@ if (ObjC.available) {
     // ══════════════════════════════════════════
     // 6. CommonCrypto 加密监控
     // ══════════════════════════════════════════
-    var ccCrypt = Module.findExportByName('libcommonCrypto.dylib', 'CCCrypt');
+    var ccCrypt = fpFindExport('libcommonCrypto.dylib', 'CCCrypt');
     if (ccCrypt) {
         Interceptor.attach(ccCrypt, {
             onEnter(args) {

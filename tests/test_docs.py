@@ -226,7 +226,7 @@ def test_cli_example_is_accepted_by_the_app(doc: Path, source: str, line: str):
     path = []
 
     # descend through command groups
-    while tokens and isinstance(command, click.Group) and not tokens[0].startswith("-"):
+    while tokens and hasattr(command, "commands") and not tokens[0].startswith("-"):
         name = tokens.pop(0)
         sub = command.commands.get(name)
         assert sub is not None, f"{doc.name}: unknown command `{' '.join(path + [name])}`"

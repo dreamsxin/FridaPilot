@@ -192,14 +192,9 @@ def detect_protection_level(data: bytes) -> ProtectionLevel:
     if kdf_hits:
         return ProtectionLevel(2, "Key derivation (KDF)", "HIGH", kdf_hits)
 
-    # L1: XOR obfuscation patterns
-    xor_patterns = [b"\x34", b"\x30\xc1", b"\x80\xf1"]  # XOR AL,imm / XOR CL,imm
-    xor_count = sum(data.count(p) for p in xor_patterns)
-    if xor_count > 50:
-        evidence.append(f"XOR instruction patterns: {xor_count} occurrences")
-        return ProtectionLevel(1, "XOR obfuscation", "MEDIUM", evidence)
-
-    # L0: Plaintext key adjacent to S-Box
+    # L0: Plaintext key adjacent to S-Box - strongest static evidence, checked
+    # before the cheap heuristics so a noisy XOR count cannot shadow it
+    # (audit finding H-C1: the L1 return used to make L0 unreachable).
     if sbox_offsets:
         for offset in sbox_offsets:
             # Check 32/48/64 bytes before S-Box for high-entropy blocks
@@ -215,6 +210,19 @@ def detect_protection_level(data: bytes) -> ProtectionLevel:
             return ProtectionLevel(0, "Plaintext key in .rdata", "HIGH", evidence)
         return ProtectionLevel(0, "S-Box found, key location unknown", "LOW",
                                [f"S-Box at offset 0x{o:x}" for o in sbox_offsets])
+
+    # L1: XOR obfuscation patterns
+    # NOTE: the single-byte pattern b"\x34" (XOR AL, imm8) was removed on
+    # purpose: data.count(b"\x34") matches every 0x34 byte anywhere in the
+    # file (data segments included), so on any file above ~13 KB the count
+    # crosses any fixed threshold and every binary reads as "XOR obfuscation".
+    # Only the two-byte opcode pairs remain; revisit with real disassembly
+    # constrained to executable sections if recall matters.
+    xor_patterns = [b"\x30\xc1", b"\x80\xf1"]  # XOR r8,r/m8 opcode pairs
+    xor_count = sum(data.count(p) for p in xor_patterns)
+    if xor_count > 50:
+        evidence.append(f"XOR instruction patterns: {xor_count} occurrences")
+        return ProtectionLevel(1, "XOR obfuscation", "MEDIUM", evidence)
 
     return ProtectionLevel(-1, "No crypto indicators found", "LOW", [])
 
@@ -258,10 +266,25 @@ def get_bcrypt_hook_script() -> str:
     """Get a Frida script that hooks Windows BCrypt APIs to capture keys."""
     return """\
 // Hook BCrypt APIs to capture encryption keys and parameters
-const bcrypt = Module.findModuleByName('bcrypt.dll');
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
+const bcrypt = fpFindModule('bcrypt.dll');
 if (bcrypt) {
     // BCryptGenerateSymmetricKey - captures key material
-    const genKey = Module.findExportByName('bcrypt.dll', 'BCryptGenerateSymmetricKey');
+    const genKey = fpFindExport('bcrypt.dll', 'BCryptGenerateSymmetricKey');
     if (genKey) {
         Interceptor.attach(genKey, {
             onEnter(args) {
@@ -284,7 +307,7 @@ if (bcrypt) {
     }
 
     // BCryptEncrypt - captures plaintext and IV
-    const encrypt = Module.findExportByName('bcrypt.dll', 'BCryptEncrypt');
+    const encrypt = fpFindExport('bcrypt.dll', 'BCryptEncrypt');
     if (encrypt) {
         Interceptor.attach(encrypt, {
             onEnter(args) {
@@ -292,12 +315,17 @@ if (bcrypt) {
                 this.cbInput = args[2].toInt32();
                 this.pbIV = args[4];
                 this.cbIV = args[5].toInt32();
-            },
+                // CNG overwrites the IV buffer in place (chained IV): snapshot
+                // in onEnter, or onLeave reads the NEXT round's IV, not this
+                // call's (audit finding M-C1).
+                this.ivSnapshot = (this.cbIV > 0 && !this.pbIV.isNull())
+                    ? this.pbIV.readByteArray(this.cbIV) : null;
+            }
             onLeave(retval) {
                 if (retval.toInt32() === 0) {
                     const msg = { type: 'bcrypt_encrypt', inputSize: this.cbInput };
-                    if (this.cbIV > 0 && !this.pbIV.isNull()) {
-                        const iv = Memory.readByteArray(this.pbIV, this.cbIV);
+                    if (this.ivSnapshot) {
+                        const iv = this.ivSnapshot;
                         msg.iv = Array.from(new Uint8Array(iv)).map(b => ('0'+b.toString(16)).slice(-2)).join('');
                     }
                     send(msg);
@@ -307,7 +335,7 @@ if (bcrypt) {
     }
 
     // BCryptDecrypt - captures ciphertext and IV
-    const decrypt = Module.findExportByName('bcrypt.dll', 'BCryptDecrypt');
+    const decrypt = fpFindExport('bcrypt.dll', 'BCryptDecrypt');
     if (decrypt) {
         Interceptor.attach(decrypt, {
             onEnter(args) {
@@ -315,12 +343,17 @@ if (bcrypt) {
                 this.cbInput = args[2].toInt32();
                 this.pbIV = args[4];
                 this.cbIV = args[5].toInt32();
-            },
+                // CNG overwrites the IV buffer in place (chained IV): snapshot
+                // in onEnter, or onLeave reads the NEXT round's IV, not this
+                // call's (audit finding M-C1).
+                this.ivSnapshot = (this.cbIV > 0 && !this.pbIV.isNull())
+                    ? this.pbIV.readByteArray(this.cbIV) : null;
+            }
             onLeave(retval) {
                 if (retval.toInt32() === 0) {
                     const msg = { type: 'bcrypt_decrypt', inputSize: this.cbInput };
-                    if (this.cbIV > 0 && !this.pbIV.isNull()) {
-                        const iv = Memory.readByteArray(this.pbIV, this.cbIV);
+                    if (this.ivSnapshot) {
+                        const iv = this.ivSnapshot;
                         msg.iv = Array.from(new Uint8Array(iv)).map(b => ('0'+b.toString(16)).slice(-2)).join('');
                     }
                     send(msg);
@@ -471,7 +504,17 @@ def find_xor_key(
     XOR it with the ciphertext to recover the key.
     """
     key_len = min(len(encrypted), len(known_plaintext))
-    return bytes(encrypted[i] ^ known_plaintext[i] for i in range(key_len))
+    keystream = bytes(encrypted[i] ^ known_plaintext[i] for i in range(key_len))
+    # The keystream repeats with the true key's period. Trim to the shortest
+    # prefix that reproduces the whole keystream (ks[i] == ks[i % p]) so the
+    # caller receives the repeating KEY rather than one keystream window;
+    # repeating it at the wrong period corrupts everything past the known
+    # plaintext (audit finding H-C2).
+    n = len(keystream)
+    for period in range(1, n // 2 + 1):
+        if all(keystream[i] == keystream[i % period] for i in range(period, n)):
+            return keystream[:period]
+    return keystream
 
 
 def bruteforce_single_byte_xor(data: bytes, top_n: int = 3) -> list[tuple[int, float, str]]:

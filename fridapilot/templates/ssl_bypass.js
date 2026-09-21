@@ -2,7 +2,7 @@
 // Covers Android (TrustManager, OkHttp, WebView) and iOS (NSURLSession)
 
 // --- Android ---
-if (Java && Java.available) {
+if (typeof Java !== "undefined" && Java.available) {
     Java.perform(() => {
         // TrustManager bypass
         try {
@@ -37,7 +37,7 @@ if (Java && Java.available) {
 }
 
 // --- iOS ---
-if (ObjC && ObjC.available) {
+if (typeof ObjC !== "undefined" && ObjC.available) {
     try {
         const NSURLSessionDel = ObjC.classes.NSURLSessionDelegate;
         if (NSURLSessionDel) {

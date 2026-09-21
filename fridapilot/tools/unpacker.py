@@ -275,13 +275,15 @@ def dump_process_memory(
         return UnpackResult(success=False, method="memory_dump", error=str(e))
 
 
-def auto_unpack(filepath: str | Path) -> UnpackResult:
+def auto_unpack(filepath: str | Path, output_path: str | Path = "") -> UnpackResult:
     """Full unpack pipeline: detect packer → try UPX → report.
 
     For non-UPX packers, use dump_process_memory separately on the running process.
 
     Args:
         filepath: Path to the potentially packed binary.
+        output_path: Where to write the unpacked binary. Empty string means
+            the default location (<name>_unpacked<ext> next to the input).
 
     Returns:
         UnpackResult from the best available method.
@@ -295,7 +297,7 @@ def auto_unpack(filepath: str | Path) -> UnpackResult:
 
     # Try UPX first (works for UPX and sometimes UPX-compatible packers)
     if info.packer_name == "UPX" or info.packer_name.startswith("unknown"):
-        upx_result = unpack_upx(filepath)
+        upx_result = unpack_upx(filepath, output_path or None)
         upx_result.packer_info = info
         if upx_result.success:
             return upx_result

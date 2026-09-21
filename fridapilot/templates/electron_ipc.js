@@ -1,8 +1,23 @@
 // Electron IPC Hook - Monitor IPC communication between main and renderer processes
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
 // Hooks ipcRenderer.invoke, ipcRenderer.send, ipcMain.handle, ipcMain.on
 
 // Hook require to intercept electron module
-const origRequire = Module.findExportByName(null, 'require');
+const origRequire = fpFindExport(null, 'require');
 
 // Monitor ipcRenderer.send / invoke
 try {

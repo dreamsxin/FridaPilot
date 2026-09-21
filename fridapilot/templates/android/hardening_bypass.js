@@ -1,7 +1,22 @@
 // Android 加固绕过脚本 - 360加固/腾讯乐固/梆梆/爱加密/DexGuard/通用壳
+// Frida 16/17 compat: static Module lookup APIs were removed in Frida 17.
+function fpFindExport(moduleName, exportName) {
+    if (typeof Module.getGlobalExportByName === "function") {
+        if (moduleName) {
+            const mod = Process.findModuleByName(moduleName);
+            return mod ? mod.findExportByName(exportName) : null;
+        }
+        try { return Module.getGlobalExportByName(exportName); } catch (e) { return null; }
+    }
+    return Module.findExportByName(moduleName, exportName);
+}
+function fpFindModule(moduleName) {
+    if (typeof Process.findModuleByName === "function") return Process.findModuleByName(moduleName);
+    return Module.findModuleByName(moduleName);
+}
 // FridaPilot - Android Packer/Protector Bypass
 
-Java.perform(() => {
+if (typeof Java !== "undefined" && Java.available) Java.perform(() => {
     console.log('[FridaPilot] Android Hardening Bypass Loaded');
 
     // ══════════════════════════════════════════
@@ -41,11 +56,11 @@ Java.perform(() => {
     // ══════════════════════════════════════════
     // 360加固特征: com.qihoo.util, com.stub.StubApp, libjiagu.so
     try {
-        var jiagu = Module.findModuleByName('libjiagu.so');
+        var jiagu = fpFindModule('libjiagu.so');
         if (jiagu) {
             send({ type: 'packer_detected', packer: '360加固', module: 'libjiagu.so', base: jiagu.base });
             // Hook pthread_create to detect anti-debug threads
-            Interceptor.attach(Module.findExportByName('libc.so', 'pthread_create'), {
+            Interceptor.attach(fpFindExport('libc.so', 'pthread_create'), {
                 onEnter(args) {
                     var funcAddr = args[2];
                     var moduleName = '';
@@ -66,7 +81,7 @@ Java.perform(() => {
     try {
         var shellModules = ['libshella-2.11.0.4.so', 'libshella-2.10.3.0.so', 'libshella.so'];
         shellModules.forEach(name => {
-            var mod = Module.findModuleByName(name);
+            var mod = fpFindModule(name);
             if (mod) {
                 send({ type: 'packer_detected', packer: '腾讯乐固', module: name, base: mod.base });
             }
@@ -78,7 +93,7 @@ Java.perform(() => {
     // ══════════════════════════════════════════
     // 特征: libsecexe.so, libDexHelper.so, com.secshell.app.ShellApplication
     try {
-        var bangbang = Module.findModuleByName('libsecexe.so') || Module.findModuleByName('libDexHelper.so');
+        var bangbang = fpFindModule('libsecexe.so') || fpFindModule('libDexHelper.so');
         if (bangbang) {
             send({ type: 'packer_detected', packer: '梆梆加固', module: bangbang.name, base: bangbang.base });
         }
@@ -90,7 +105,7 @@ Java.perform(() => {
 
     // 5a. TracerPid 反检测
     try {
-        var fopen = Module.findExportByName('libc.so', 'fopen');
+        var fopen = fpFindExport('libc.so', 'fopen');
         Interceptor.attach(fopen, {
             onEnter(args) {
                 this.path = args[0].readCString();
@@ -105,7 +120,7 @@ Java.perform(() => {
 
     // 5b. ptrace 反调试
     try {
-        Interceptor.attach(Module.findExportByName('libc.so', 'ptrace'), {
+        Interceptor.attach(fpFindExport('libc.so', 'ptrace'), {
             onEnter(args) { this.req = args[0].toInt32(); },
             onLeave(retval) {
                 if (this.req === 0) { // PTRACE_TRACEME
@@ -118,7 +133,7 @@ Java.perform(() => {
 
     // 5c. exit/kill 防崩溃
     try {
-        Interceptor.attach(Module.findExportByName('libc.so', 'exit'), {
+        Interceptor.attach(fpFindExport('libc.so', 'exit'), {
             onEnter(args) {
                 send({ type: 'antidebug', detail: 'exit() blocked, code=' + args[0].toInt32() });
                 args[0] = ptr(0); // Prevent exit
@@ -131,7 +146,7 @@ Java.perform(() => {
     // ══════════════════════════════════════════
     // 6a. 隐藏 frida-server 端口 (27042)
     try {
-        Interceptor.attach(Module.findExportByName('libc.so', 'strstr'), {
+        Interceptor.attach(fpFindExport('libc.so', 'strstr'), {
             onEnter(args) {
                 this.haystack = args[0];
                 this.needle = args[1].readCString();
@@ -150,7 +165,7 @@ Java.perform(() => {
 
     // 6b. 隐藏 /proc/self/maps 中的 frida 痕迹
     try {
-        var openFunc = Module.findExportByName('libc.so', 'open');
+        var openFunc = fpFindExport('libc.so', 'open');
         Interceptor.attach(openFunc, {
             onEnter(args) {
                 this.path = args[0].readCString();

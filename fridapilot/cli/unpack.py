@@ -68,7 +68,7 @@ def auto_cmd(
     import json as json_mod
     from fridapilot.tools.unpacker import auto_unpack
 
-    result = auto_unpack(binary)
+    result = auto_unpack(binary, output)
 
     if json_output:
         out = {
