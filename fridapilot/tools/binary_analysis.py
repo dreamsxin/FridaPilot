@@ -554,6 +554,12 @@ def xrefs_to(
         target_address: The target address (file offset) to find references to.
         search_range: Optional (start, end) range to search within.
 
+    Known limitation (audit finding M-B1): branch targets are resolved
+    in FILE-OFFSET space here, so a reference that crosses a section
+    boundary (different VA<->file-offset delta) cannot match and is
+    silently missed. A warning is logged when the PE's section deltas
+    differ. Use pe_rva.xrefs_to_rva for exact, RVA-space results.
+
     Returns:
         List of XrefResult with source addresses and instruction types.
     """
@@ -571,6 +577,30 @@ def xrefs_to(
             is_64 = machine == 0x8664
     elif data[:4] == b"\x7fELF":
         is_64 = data[4] == 2
+
+    # Cross-section honesty (audit finding M-B1): branches are resolved
+    # in file-offset space, so when this PE's sections have differing
+    # VA<->file-offset deltas, references ACROSS sections cannot match
+    # and would be silently missed. Say so instead of under-reporting.
+    if data[:2] == b"MZ" and pe_offset + 24 <= len(data):
+        opt_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
+        num_sec = struct.unpack_from("<H", data, pe_offset + 6)[0]
+        sec_table = pe_offset + 24 + opt_size
+        deltas = set()
+        if sec_table + num_sec * 40 <= len(data):
+            for i in range(num_sec):
+                off = sec_table + i * 40
+                va = struct.unpack_from("<I", data, off + 12)[0]
+                raw = struct.unpack_from("<I", data, off + 20)[0]
+                if raw:
+                    deltas.add(va - raw)
+        if len(deltas) > 1:
+            import logging
+            logging.getLogger(__name__).warning(
+                "xrefs_to: PE sections have %d distinct VA<->file-offset "
+                "deltas; branch targets are resolved in file-offset space "
+                "here, so CROSS-SECTION references will be missed - use "
+                "pe_rva.xrefs_to_rva for exact results", len(deltas))
 
     if is_64:
         md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
@@ -647,9 +677,13 @@ def analyze_go_binary(filepath: str | Path) -> GoAnalysis:
             pass
 
     # ── Package & function name extraction ──
-    # Go function names follow the pattern: package.FuncName or package.(*Type).Method
+    # Go function names follow the pattern: package.FuncName or
+    # package.(*Type).Method. The last segment must match [A-Za-z_]\w*,
+    # NOT [A-Z]\w*: unexported Go functions (main.handler,
+    # runtime.main ...) are the majority and the old pattern missed
+    # every one of them (audit finding M-B2).
     func_pattern = re.compile(
-        rb"(?:[\w./]+\.(?:\(\*\w+\)\.)?[A-Z]\w*)"
+        rb"(?:[\w./]+\.(?:\(\*\w+\)\.)?[A-Za-z_]\w*)"
     )
     seen_funcs: set[str] = set()
     seen_packages: set[str] = set()
@@ -661,16 +695,27 @@ def analyze_go_binary(filepath: str | Path) -> GoAnalysis:
         # Filter: must contain at least one dot and look like a Go symbol
         if "." not in name or len(name) > 200:
             continue
-        # Skip common non-Go patterns
-        if name.startswith("http") or name.startswith("www"):
+        # Skip domain-chain noise ONLY: real Go package paths start with
+        # "http" too (net/http), so the old startswith('http') filter
+        # dropped legitimate symbols (audit finding M-B2). A domain chain
+        # has no slash and at least two dots (www.google.com, http.x.y).
+        if "/" not in name and name.count(".") >= 2 and \
+                (name.startswith("www.") or name.startswith("http")):
             continue
+        if name.endswith(".go"):
+            continue  # source paths are extracted by the dedicated section below
         seen_funcs.add(name)
         # Extract package path (everything before the last component)
         parts = name.rsplit(".", 1)
         if len(parts) == 2 and "/" in parts[0]:
             seen_packages.add(parts[0].lstrip("(").rstrip(")"))
 
-    result.functions = sorted(seen_funcs)[:500]
+    # Widening the regex admits more bare-word noise; full import paths
+    # (with a slash) are the high-confidence symbols, so they surface first
+    # before the 500-entry cap (audit finding M-B2).
+    all_funcs = sorted(seen_funcs)
+    result.functions = ([f for f in all_funcs if "/" in f]
+                        + [f for f in all_funcs if "/" not in f])[:500]
     result.packages = sorted(seen_packages)[:200]
 
     # ── Source file paths ──
