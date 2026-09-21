@@ -10,7 +10,7 @@ Commands (GDB-style):
     b/break <addr> if <cond> Conditional breakpoint (JS expression)
     d/delete <id>            Remove breakpoint
     bl/info break            List breakpoints
-    c/continue               Wait for next breakpoint hit
+    c/continue               Resume paused hits, then wait for the next hit
     r/regs                   Show registers
     x <addr> [size]          Examine memory (hex dump)
     x/s <addr>               Examine as string
@@ -295,6 +295,14 @@ def _cmd_continue(dbg, args_str: str):
     if timeout != timeout or timeout == float("inf") or timeout < 0:
         console.print("[red]Invalid timeout: use a finite number >= 0[/red]")
         return None
+    # GDB semantics: `c` releases threads frozen on a paused hit, then
+    # waits for the NEXT hit (audit finding H-D2).
+    try:
+        resumed = dbg.continue_execution()
+    except Exception:
+        resumed = 0
+    if resumed:
+        console.print(f"[green]Resumed {resumed} paused hit(s)[/green]")
     console.print("[dim]Waiting for breakpoint hit... (Ctrl+C to cancel)[/dim]")
     try:
         hit = dbg.wait_for_hit(timeout=timeout)

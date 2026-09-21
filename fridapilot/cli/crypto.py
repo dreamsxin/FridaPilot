@@ -140,6 +140,14 @@ def crypto_bruteforce(
 
     key_sizes = [int(s.strip()) for s in key_size.split(",")]
     iv_strategies = [s.strip() for s in iv_strategy.split(",")]
+    # Invalid values used to be silently ignored downstream and the search
+    # ended in "No valid key found" - fail loudly instead (audit L-C3).
+    bad_sizes = [s for s in key_sizes if s not in (16, 24, 32)]
+    if bad_sizes:
+        raise typer.BadParameter(f"unsupported AES key size(s): {bad_sizes} (use 16, 24 or 32)")
+    unknown_strats = [s for s in iv_strategies if s not in ("first16", "zero", "adjacent")]
+    if unknown_strats:
+        raise typer.BadParameter(f"unknown IV strategy(ies): {unknown_strats} (use first16, zero, adjacent)")
 
     console.print("[bold]Brute-force AES key search[/bold]")
     console.print(f"  Binary: {binary}")

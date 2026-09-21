@@ -227,7 +227,6 @@ def disassemble(
         "x64": (capstone.CS_ARCH_X86, capstone.CS_MODE_64),
         "arm": (capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM),
         "arm64": (capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM),
-        "arm64": (capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM),
     }
     cs_arch, cs_mode = arch_map.get(arch, (capstone.CS_ARCH_X86, capstone.CS_MODE_64))
     md = capstone.Cs(cs_arch, cs_mode)

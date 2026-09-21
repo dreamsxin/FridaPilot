@@ -78,28 +78,30 @@ _DEBUGGER_SCRIPT = """\
 
 const _breakpoints = {};  // id -> { listener, address, condition, hitCount }
 let _nextBpId = 1;
-let _hitEvent = null;     // pending hit waiting for continue
-let _hitResolve = null;
+let _pausedThreads = 0;   // threads frozen on a paused hit (audit H-D2)
 
 rpc.exports = {
     // ── Breakpoint Management ──
 
-    addBreakpoint(addrStr, condition) {
+    addBreakpoint(addrStr, condition, pause) {
         const addr = ptr(addrStr);
         const bpId = _nextBpId++;
-        const bp = { id: bpId, address: addr.toString(), condition: condition || '', hitCount: 0 };
+        const bp = { id: bpId, address: addr.toString(), condition: condition || '',
+                     hitCount: 0, pause: pause !== false };
 
         bp.listener = Interceptor.attach(addr, {
             onEnter(args) {
-                bp.hitCount++;
-
-                // Conditional breakpoint: evaluate JS expression
+                // Conditional breakpoint: evaluate the JS expression BEFORE
+                // counting or pausing - a rejected condition is not a hit,
+                // and a broken condition must not wedge the target
+                // (audit finding L-D4: the count used to run first).
                 if (bp.condition) {
                     try {
                         const pass = eval(bp.condition);
                         if (!pass) return;
                     } catch(e) { /* condition error, break anyway */ }
                 }
+                bp.hitCount++;
 
                 // Capture context
                 const ctx = this.context;
@@ -145,6 +147,21 @@ rpc.exports = {
                     disassembly: disasm,
                     hit_count: bp.hitCount
                 });
+
+                if (bp.pause) {
+                    // True-stop semantics (audit finding H-D2): freeze the
+                    // thread that hit until Python posts a resume message.
+                    // Other threads keep running - the same approximation a
+                    // userspace debugger makes without OS-level suspension.
+                    // The dead _hitResolve/_hitEvent variables were the
+                    // unfinished version of exactly this.
+                    _pausedThreads += 1;
+                    let resumed = false;
+                    while (!resumed) {
+                        recv('resume', function () { resumed = true; }).wait();
+                    }
+                    _pausedThreads -= 1;
+                }
             }
         });
 
@@ -394,6 +411,18 @@ class DebugSession:
     def disconnect(self) -> None:
         """Detach and clean up."""
         if self.script:
+            # Release threads frozen on a paused hit first, or the unload
+            # wedges with the target thread stuck in recv().wait()
+            # (audit finding H-D2).
+            try:
+                paused = [bp for bp in self.breakpoints.values() if bp.state == BpState.HIT]
+                for _ in paused:
+                    self.script.post({"type": "resume"})
+                if paused:
+                    import time as _time
+                    _time.sleep(0.2)  # let the resumes land before unload
+            except Exception:
+                pass
             try:
                 self.script.unload()
             except Exception:
@@ -432,18 +461,21 @@ class DebugSession:
 
     # ── Breakpoint Commands ───────────────────────────────
 
-    def add_breakpoint(self, address: str, condition: str = "") -> Breakpoint:
+    def add_breakpoint(self, address: str, condition: str = "", pause: bool = True) -> Breakpoint:
         """Add a breakpoint at an address or module!export.
 
         Args:
             address: Hex address (0x...) or "module!export" format.
             condition: Optional JS expression evaluated at hit time.
+            pause: True (default) = true-stop semantics: the hitting
+                thread freezes until continue_execution()/`fp resume`
+                releases it (audit finding H-D2).
 
         Returns:
             Breakpoint object with assigned ID.
         """
         resolved = self._resolve_address(address)
-        result = self.script.exports_sync.add_breakpoint(resolved, condition)
+        result = self.script.exports_sync.add_breakpoint(resolved, condition, pause)
 
         bp = Breakpoint(
             id=result["id"],
@@ -464,6 +496,19 @@ class DebugSession:
     def list_breakpoints(self) -> list[Breakpoint]:
         """List all active breakpoints."""
         return list(self.breakpoints.values())
+
+    def continue_execution(self) -> int:
+        """Release threads frozen on paused breakpoints (audit H-D2).
+
+        Returns the number of paused hits resumed; each resumed
+        breakpoint's state flips back to ENABLED.
+        """
+        paused = [bp for bp in self.breakpoints.values() if bp.state == BpState.HIT]
+        for bp in paused:
+            bp.state = BpState.ENABLED
+        for _ in paused:
+            self.script.post({"type": "resume"})  # one message per frozen thread
+        return len(paused)
 
     # ── Register Commands ─────────────────────────────────
 
