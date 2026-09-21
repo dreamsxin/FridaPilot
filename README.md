@@ -122,6 +122,8 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 | `fp binary xrefs-rva <file>` | RVA-aware 交叉引用（rip 数据引用 + CALL/JMP）。范围默认整节（`--section`），并打印实际扫描覆盖率 | ❌ |
 | `fp binary callers <file> --target <rva>` | **函数的调用方**：所有可执行节扫 call/jmp + 所有数据节扫指针槽位，给出结论句（虚函数/IDL 绑定表/thunk 没有直接 call，用这个而不是 `xrefs-rva --kinds call,jmp`） | ❌ |
 | `fp binary vtable <file> --target <rva>` | 虚函数**实现地址** → 它在哪个 vtable、第几槽、MSVC RTTI 类名、安装该表的构造函数（反方向「按槽位偏移找类」静态不可解） | ❌ |
+| `fp binary describe <file> --rva <rva>` | **给无名函数起名**：用函数体引用的字符串（DCHECK 留下的 `__FILE__`、`__PRETTY_FUNCTION__`、直方图名、`movabs` 立即数），分类成源码路径/符号/普通串 | ❌ |
+| `fp binary callees <file> --rva <rva>` | 该函数**调用了谁**，每个 callee 同样起名（`callers` 的反方向；间接 `call rax` 在指令流里没有名字） | ❌ |
 
 
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
@@ -342,16 +344,20 @@ fp binary index-info target.dll
 - 索引按文件哈希校验：修改过的文件自动回退到实时扫描，且超出索引覆盖范围的查询会回退而不是返回一个看似权威的短列表
 - 只缓存 rip 引用；call/jmp/ptr 仍实时扫描
 
-**Step 3 — 收敛到函数（func-bounds → disasm → field-refs）**
+**Step 3 — 收敛到函数（describe → func-bounds → disasm → callees → field-refs）**
 
 ```bash
+fp binary describe target.dll --rva 0xc43500
 fp binary func-bounds target.dll --rva 0xc43500
 fp binary disasm-rva target.dll --rva 0xc43500 --count 60
+fp binary callees target.dll --rva 0xc43500
 fp binary field-refs target.dll --offset 0xB0
 ```
 
+- `describe` 先把无名函数变成人能读的东西：用函数体引用的字符串起名。DCHECK / NOTREACHED 展开会留下 `__FILE__` 和 `__PRETTY_FUNCTION__`，直方图名也是字面量。**产出依赖构建**：release 版剥掉了大部分 DCHECK，这时只剩普通字符串——实测某 294 MB release chrome.dll 上一个 981 字节函数没有任何源码路径，但拿到 `user-data-dir | sf_cookie.txt | protected-cookiesfile`，已经够认出它了。工具分三类返回，不会把普通串伪装成符号名
 - `func-bounds` 从 `.pdata` 取精确边界；返回 None 不代表"不是函数"（叶函数可能没有 .pdata 条目）
-- `disasm-rva` ImageBase 正确、rip/call 目标自动标注
+- `disasm-rva` ImageBase 正确；rip 目标会带上所在节和目标处的字符串，立即数里的文本也会标出来（`; imm="ConfigVa"`）
+- `callees` 是 `callers` 的反方向：该函数调了谁，每个 callee 同样起名。只列直接 `call 0x…`，间接 `call rax` 在指令流里没有名字
 - `field-refs` 定位结构体字段读写（如 `this->field_ at +0xB0`）
 
 **偏移不是身份。** `field-refs` 命中上百条时会警告：偏移被无关类共享，这是噪声不是答案（实测某 vtable 槽位偏移在一个 Chromium DLL 里 200+ 处命中）。派发点不知道对象的动态类型，所以过滤不可能把它收窄——这不是工具能修的。走可解的方向：
@@ -593,6 +599,8 @@ binary_inline_strings     # 定位 movabs 内联构造的字符串（连续搜�
 binary_xrefs_rva          # RVA 交叉引用（rip 数据引用 + call/jmp，支持 pdata_only）
 binary_callers            # 函数调用方：code 节 call/jmp + data 节指针槽位，附结论句
 binary_vtable             # 虚函数实现 → vtable/槽号/RTTI 类名/安装该表的构造函数
+binary_describe_function  # 用函数体引用的字符串给无名函数起名（源码路径/符号/普通串）
+binary_callees            # 该函数调用了谁，每个 callee 同样起名
 binary_func_bounds        # 从 .pdata 取函数边界
 binary_disasm_rva         # RVA-aware 反汇编（rip/call 目标标注）
 binary_field_refs         # 结构体字段 [reg+offset] 读写定位

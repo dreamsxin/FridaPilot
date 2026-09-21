@@ -28,10 +28,12 @@ import pytest
 
 from fridapilot.tools.pe_rva import (
     PEImage,
+    describe_function,
     field_refs,
     find_inline_strings,
     find_string_rvas,
     function_bounds,
+    function_callees,
     function_xrefs,
     map_refs_to_functions,
     section_range,
@@ -548,6 +550,54 @@ def test_field_refs_warns_when_the_offset_cannot_discriminate(fixture_pe, caplog
     assert len(hits) > 100
     assert "not discriminating" in caplog.text
     assert "vtable_of_function" in caplog.text
+
+
+# ── labelling: turn "referenced from 0x…" into something a human can act on ──
+
+def test_describe_function_promotes_a_source_path_over_other_strings(fixture_pe):
+    """A `__FILE__` left behind by DCHECK names the function; a random literal does not.
+
+    Written to a scratch image so the shared fixture keeps its pointer/marker layout: the
+    probe deliberately overwrites the data every rip form in the fixture points at.
+    """
+    path, _placed, _end = fixture_pe
+    img = PEImage(path)
+    probe = b"..\\..\\base\\command_line.cc\x00"
+
+    data = bytearray(Path(path).read_bytes())
+    off = img.rva_to_off(TARGET_RVA)
+    data[off:off + len(probe)] = probe
+    labelled = Path(path).with_name("labelled.dll")
+    labelled.write_bytes(bytes(data))
+
+    res = describe_function(str(labelled), TEXT_RVA)
+    assert res["has_bounds"], "the fixture's main function has a .pdata entry"
+    assert res["source_paths"] == ["..\\..\\base\\command_line.cc"]
+    assert res["label"] == "..\\..\\base\\command_line.cc"
+
+
+def test_describe_function_falls_back_to_a_budget_on_a_pdata_less_leaf(fixture_pe):
+    """None from function_bounds means "no RUNTIME_FUNCTION", not "not a function".
+
+    The inline-string site is outside every .pdata entry, and the text it carries lives in
+    a movabs immediate — there is no .rdata copy to point at, so only the immediate reader
+    can see it.
+    """
+    path, _placed, _end = fixture_pe
+    assert function_bounds(path, INLINE_RVA) is None
+
+    res = describe_function(path, INLINE_RVA, budget=64)
+    assert res["has_bounds"] is False
+    assert res["size"] == 64
+    assert INLINE_TEXT[:8] in res["strings"]
+
+
+def test_function_callees_lists_the_direct_call_target(fixture_pe):
+    """The other direction from function_xrefs: what this function reaches."""
+    path, _placed, _end = fixture_pe
+    rows = function_callees(path, TEXT_RVA)
+    assert [r["callee_rva"] for r in rows] == [CALL_TARGET_RVA]
+    assert rows[0]["from_rva"] < CALL_TARGET_RVA
 
 
 # ── a hit is a substring, and the tool has to say which ──

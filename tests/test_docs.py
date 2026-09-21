@@ -305,6 +305,8 @@ def _actual_keys(name: str, path: str) -> set[str]:
         "vtable_of_function": lambda: pe_rva.vtable_of_function(path, INDIRECT_FN_RVA)[0],
         "field_refs": lambda: None,
         "function_bounds": lambda: pe_rva.function_bounds(path, TEXT_RVA),
+        "describe_function": lambda: pe_rva.describe_function(path, TEXT_RVA),
+        "function_callees": lambda: pe_rva.function_callees(path, TEXT_RVA)[0],
         "disassemble_rva": lambda: pe_rva.disassemble_rva(path, TEXT_RVA, 1),
         "map_refs_to_functions": lambda: pe_rva.map_refs_to_functions(
             path, {"g": TARGET_RVA}, TEXT_RVA, end),

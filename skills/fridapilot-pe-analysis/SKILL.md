@@ -385,7 +385,56 @@ and for anything in a 32-bit image, where there is no `.pdata` at all. `None` th
 fp binary func-bounds chrome.dll --rva 0x1c43500
 ```
 
+### describe_function — what is this function, actually?
+
+Every other tool here answers with a bare address ("referenced from 0x1c43500") and leaves
+identifying that function to you. This closes the loop from the strings the body itself
+references: `DCHECK` / `NOTREACHED` expand to `__FILE__` and `__PRETTY_FUNCTION__`, histogram
+names are literals, so a function usually names itself.
+
+```python
+from fridapilot.tools.pe_rva import describe_function, function_callees
+
+info = describe_function("chrome.dll", 0x1c43500)
+```
+
+<!-- return-keys: describe_function = rva, begin_rva, end_rva, size, has_bounds, source_paths, symbols, strings, label -->
+Returns `rva`, `begin_rva`, `end_rva`, `size`, `has_bounds`, `source_paths` (strings that look
+like `__FILE__`), `symbols` (strings containing `::`), `strings` (everything else, including text
+carried in `movabs` immediates) and `label` (the first non-empty group, joined).
+
+The three groups are separate because the yield is **build-dependent**: a release Chromium strips
+most DCHECKs, and then plain strings are all there is. Measured on a 294 MB release `chrome.dll`,
+a 981-byte function returned no source path at all and
+`user-data-dir | sf_cookie.txt | protected-cookiesfile` — still enough to recognise it. Report
+what came back; do not promote a guess to a symbol name.
+
+`has_bounds` False means no `.pdata` entry (a leaf), in which case `budget` bytes were decoded
+from the given RVA instead of the exact body.
+
+```bash
+fp binary describe chrome.dll --rva 0x1c43500
+```
+
+### function_callees — what does it call?
+
+```python
+callees = function_callees("chrome.dll", 0x1c43500)
+```
+
+<!-- return-keys: function_callees = from_rva, callee_rva, begin_rva, end_rva, size, has_bounds, label -->
+Rows: `from_rva` (the call site), `callee_rva`, `begin_rva`, `end_rva`, `size`, `has_bounds`,
+`label` (the callee described the same way). The other half of `function_xrefs`. Only direct
+`call 0x…` sites are listed — an indirect `call rax` names no callee in the instruction stream,
+the same reason a call/jmp scan cannot see a virtual method.
+
+```bash
+fp binary callees chrome.dll --rva 0x1c43500
+fp binary callees chrome.dll --rva 0x1c43500 --no-label --json
+```
+
 ### disassemble_rva — RVA-aware disassembly
+
 
 ```python
 result = disassemble_rva("chrome.dll", 0x1c43550, count=20)
@@ -395,9 +444,19 @@ result = disassemble_rva("chrome.dll", rva=0x1c43550, count=20,
 
 <!-- return-keys: disassemble_rva = image_base, start_rva, lines -->
 Returns `image_base`, `start_rva`, `lines`; each line has `rva`, `va`, `bytes_hex`, `mnemonic`,
-`op_str`, `note`. `note` carries the resolved rip target RVA and, when `symbols` is supplied,
-the matching name. On an RVA with no backing file data (BSS) the result carries an `error` key
+`op_str`, `note`. On an RVA with no backing file data (BSS) the result carries an `error` key
 and an empty `lines` list.
+
+`note` is self-contained on purpose — the resolved rip target RVA, the **section** it lands in,
+the `symbols` name when supplied, and the **text at the target** when it reads as one:
+
+```
+0748a05b  lea rbx, [rip + 0x952e84e]   ; [rip]-> RVA 0x109b88b0 [.rdata] "protected-cookiesfile"
+```
+
+Text in an immediate is annotated too (`; imm="ConfigVa"`) — that is the discovery direction of
+`find_inline_strings`: a `movabs` loading 8 printable bytes is a string being assembled in a
+register, and nothing in the mnemonic says so.
 
 The parameters are `rva` and `count` — not `start_rva` / `num_instructions`.
 

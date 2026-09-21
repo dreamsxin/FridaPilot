@@ -216,6 +216,14 @@ If a signature changes, fix the docs in the same commit — the test will point 
   zero standalone strings. Rows therefore carry `whole` and `enclosing` (the NUL-delimited run
   around the hit) so no caller has to re-derive it. *(enforced:
   `tests/test_pe_rva.py::test_a_suffix_hit_is_reported_as_a_substring_not_as_a_string`)*
+- **One `md.disasm` pass over a function body ends at the first data byte.** A jump table,
+  alignment junk or a constant pool inside the body stops capstone dead, and the generator simply
+  finishes — silently dropping everything after the stall. `_iter_rip_refs` has always resynced
+  one byte at a time for this reason; `_decode_body` now does it for `describe_function` /
+  `function_callees`, after the synthetic fixture's data-in-code byte hid the single `call` in its
+  main function and `function_callees` returned an empty list that looked like "dispatches
+  indirectly". *(enforced:
+  `tests/test_pe_rva.py::test_function_callees_lists_the_direct_call_target`)*
 - **String extraction is encoding-blind by default.** The ASCII scanner accepts only 0x20-0x7e,
   so GBK / Shift-JIS / CP1251 text is invisible to it; pass an explicit `codepage`, or use
   `find_text` to search one string under several codecs. Legacy code pages decode almost any

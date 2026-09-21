@@ -1119,6 +1119,99 @@ def callers_cmd(
 
 
 
+@binary_app.command("describe")
+def describe_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file."),
+    rva: str = typer.Option(..., "--rva", "-r", help="Any RVA inside the function."),
+    budget: int = typer.Option(8192, "--budget", help="Max bytes of the body to decode."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Name an unnamed function from the strings its own body references.
+
+    Every other command here answers with a bare address ("referenced from 0x748a05b")
+    and leaves identifying that function to you. DCHECK / NOTREACHED expand to __FILE__
+    and __PRETTY_FUNCTION__, histogram names are literals, so the strings a function
+    points at usually name it. A release build strips most DCHECKs, so plain strings are
+    often all there is - they are reported separately instead of faked into a symbol.
+
+    Examples:
+      fp binary describe chrome.dll --rva 0x1c43500
+      fp binary describe chrome.dll -r 0x1c43500 --json
+    """
+    from fridapilot.tools.pe_rva import describe_function
+
+    filepath = Path(binary)
+    if not filepath.exists():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+    res = describe_function(binary, int(rva, 0), budget=budget)
+
+    if json_output:
+        _emit_json(res)
+        return
+
+    bounds = (f"0x{res['begin_rva']:x}-0x{res['end_rva']:x} ({res['size']} bytes)"
+              if res["has_bounds"] else
+              f"no .pdata entry - decoded {res['size']} bytes from 0x{res['begin_rva']:x}")
+    console.print(f"[bold]0x{res['rva']:x}[/bold]  {bounds}")
+    console.print(f"  [green]{_console_safe(res['label'], 200)}[/green]")
+    for title, key, style in (("source paths", "source_paths", "cyan"),
+                              ("symbols", "symbols", "magenta"),
+                              ("strings", "strings", "dim")):
+        if res[key]:
+            console.print(f"  [{style}]{title}[/{style}]: "
+                          + ", ".join(_console_safe(s, 70) for s in res[key][:12]))
+
+
+@binary_app.command("callees")
+def callees_cmd(
+    binary: str = typer.Argument(..., help="Path to PE file."),
+    rva: str = typer.Option(..., "--rva", "-r", help="Any RVA inside the calling function."),
+    budget: int = typer.Option(8192, "--budget", help="Max bytes of each body to decode."),
+    no_label: bool = typer.Option(False, "--no-label", help="Skip labelling each callee."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """What this function calls, with each callee labelled - the other half of `callers`.
+
+    Only direct `call 0x...` sites appear: an indirect `call rax` names no callee in the
+    instruction stream, which is the same reason a call/jmp scan cannot see a virtual
+    method. Use `callers` for the reverse direction.
+
+    Examples:
+      fp binary callees chrome.dll --rva 0x1c43500
+      fp binary callees chrome.dll -r 0x1c43500 --no-label --json
+    """
+    from fridapilot.tools.pe_rva import function_callees
+
+    filepath = Path(binary)
+    if not filepath.exists():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+
+    rows = function_callees(binary, int(rva, 0), budget=budget, label=not no_label)
+
+    if json_output:
+        _emit_json(rows)
+        return
+
+    if not rows:
+        console.print("[yellow]no direct call sites - the function may dispatch "
+                      "indirectly, or the RVA is not in a function[/yellow]")
+        return
+
+    table = Table(title=f"Callees of 0x{int(rva, 0):x} ({len(rows)})")
+    table.add_column("Call site", style="cyan")
+    table.add_column("Callee", style="green")
+    table.add_column("Size", justify="right")
+    table.add_column("Label", style="dim")
+    for r in rows:
+        table.add_row(f"0x{r['from_rva']:08x}", f"0x{r['callee_rva']:08x}",
+                      str(r["size"]) if r["has_bounds"] else "?",
+                      _console_safe(r["label"], 90))
+    console.print(table)
+
+
 @binary_app.command("analyze-macho")
 def analyze_macho_cmd(
     binary: str = typer.Argument(..., help="Path to Mach-O binary."),

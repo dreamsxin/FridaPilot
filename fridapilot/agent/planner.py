@@ -236,6 +236,15 @@ When target is an iOS/macOS app, follow this specialized pipeline:
   implementation, or settle it at runtime by behavioural comparison
 - pe_rva.field_refs(path, offset, kind, start, end) -> Find struct field read/write at a given offset (e.g., offset=0xB0)
   Warns when the match count is too high to identify a field - a shared offset is noise, not an answer
+- pe_rva.describe_function(path, rva) -> Name an unnamed function from the strings its body
+  references. Every other tool here answers with a bare address; call this to turn
+  "referenced from 0x748a05b" into something readable. DCHECK/NOTREACHED leave __FILE__ and
+  __PRETTY_FUNCTION__ behind, so source_paths/symbols often name the function; on a release
+  build they are stripped and only `strings` is populated - report what came back, do not
+  invent a name
+- pe_rva.function_callees(path, rva) -> What this function calls, each callee labelled the
+  same way. The other half of function_xrefs. Direct `call 0x...` only: an indirect
+  `call rax` names no callee in the instruction stream
 - pe_rva.map_refs_to_functions(path, strings, start, end) -> Map multiple strings to their consuming functions in one pass
 - rip_index.build_rip_index(path, section) -> Scan the section ONCE and persist every rip
   reference into data sections. Afterwards xrefs_to_rva answers rip queries from the index

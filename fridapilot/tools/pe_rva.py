@@ -297,6 +297,44 @@ def find_string_rvas(
     return out
 
 
+def _text_at(img: PEImage, rva: int, min_len: int = 4, cap: int = 200) -> tuple[str, str] | None:
+    """Readable text at an RVA as (text, encoding), or None.
+
+    ASCII first, then UTF-16LE. Trying only ASCII is the documented reason wide strings
+    vanish from output that looks complete, and a resolved reference target is exactly
+    where a wide string shows up in Chromium code.
+    """
+    raw = img.read_rva(rva, cap)
+    if not raw:
+        return None
+    run = raw.split(b"\0")[0]
+    if len(run) >= min_len and all(0x20 <= c < 0x7F for c in run):
+        return run.decode(), "ascii"
+    end = 0
+    while end + 1 < len(raw) and raw[end + 1] == 0 and 0x20 <= raw[end] < 0x7F:
+        end += 2
+    if end // 2 >= min_len:
+        return raw[:end].decode("utf-16-le"), "utf16le"
+    return None
+
+
+def _immediate_text(insn, cx86) -> str:
+    """Text carried in an instruction's immediate operand, or "".
+
+    The discovery direction of ``find_inline_strings``: while reading code, a
+    ``movabs rax, 0x6567617373654d`` is 8 characters of a string being assembled in a
+    register, and nothing in the mnemonic says so. Reads the operand rather than
+    parsing ``op_str``, which loses the width and breaks on negative values.
+    """
+    for op in insn.operands:
+        if op.type != cx86.X86_OP_IMM:
+            continue
+        raw = (op.imm & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "little").rstrip(b"\0")
+        if len(raw) >= 4 and all(0x20 <= c < 0x7F for c in raw):
+            return raw.decode()
+    return ""
+
+
 def disassemble_rva(
     binary_path: str | Path,
     rva: int,
@@ -346,8 +384,22 @@ def disassemble_rva(
                 if op.type == cx86.X86_OP_MEM and op.mem.base == cx86.X86_REG_RIP:
                     tgt_rva = insn.address + insn.size + op.mem.disp - img.image_base
                     name = symbols.get(tgt_rva, "")
-                    note = "; [rip]-> RVA 0x%x%s" % (tgt_rva, (" " + name) if name else "")
+                    # Section and content, not just the address: without them every
+                    # data reference looks alike and the reader has to jump away to
+                    # find out whether it is a string, a vtable or a counter.
+                    note = "; [rip]-> RVA 0x%x" % tgt_rva
+                    section = img.section_of(tgt_rva)
+                    if section:
+                        note += " [%s]" % section
+                    if name:
+                        note += " " + name
+                    found = _text_at(img, tgt_rva)
+                    if found:
+                        note += ' "%s"' % found[0][:60]
                     break
+        text_imm = _immediate_text(insn, cx86)
+        if text_imm:
+            note += '   ; imm="%s"' % text_imm
         lines.append({
             "rva": cur_rva, "va": insn.address, "bytes_hex": insn.bytes.hex(),
             "mnemonic": insn.mnemonic, "op_str": insn.op_str, "note": note,
@@ -382,6 +434,164 @@ def function_bounds(
     return {"begin_rva": begin, "end_rva": end,
             "size": end - begin, "unwind_info_rva": unwind}
 
+
+
+_SOURCE_SUFFIXES = (".cc", ".cpp", ".cxx", ".h", ".hpp", ".mm", ".rs")
+
+
+def _decode_body(img: PEImage, md: Any, begin: int, end: int, budget: int):
+    """Yield the instructions of a function body, resyncing over embedded data.
+
+    A jump table, alignment junk or a constant pool inside the body stops capstone
+    dead, so a single ``md.disasm`` pass ends early and everything after the stall is
+    silently missed — the synthetic fixture's data-in-code byte caught exactly that,
+    hiding the one ``call`` in the function. Resyncing costs one byte per stall, the
+    same trade ``_iter_rip_refs`` already makes.
+    """
+    span = max(min(end - begin, budget), 0)
+    data = img.read_rva(begin, span) or b""
+    base_va = img.rva_to_va(begin)
+    pos = 0
+    while pos < len(data):
+        progressed = False
+        for insn in md.disasm(data[pos:], base_va + pos):
+            progressed = True
+            pos = insn.address - base_va + insn.size
+            yield insn
+        if not progressed:
+            pos += 1
+
+
+def _function_strings(img: PEImage, md: Any, begin: int, end: int,
+                      budget: int = 8192, limit: int = 24):
+    """Strings a function reaches, split into source paths / symbols / everything else.
+
+    The cheapest substitute for a symbol table on an unstripped-ish Chromium build:
+    ``DCHECK``/``NOTREACHED`` expand to ``__FILE__`` and ``__PRETTY_FUNCTION__``, and
+    histogram names are literals too, so the strings a function points at usually name
+    it. Yield depends on the build — a release image strips most DCHECKs, so the honest
+    result is often only the plain strings (measured on one 294 MB release chrome.dll:
+    a 981-byte function yielded ``user-data-dir`` and ``protected-cookiesfile`` and no
+    source path at all). Both are returned separately instead of pretending one exists.
+    """
+    from capstone import x86 as cx86
+
+    paths: list[str] = []
+    symbols: list[str] = []
+    other: list[str] = []
+    for insn in _decode_body(img, md, begin, end, budget):
+        for op in insn.operands:
+            if op.type != cx86.X86_OP_MEM or op.mem.base != cx86.X86_REG_RIP:
+                continue
+            tgt = insn.address + insn.size + op.mem.disp - img.image_base
+            found = _text_at(img, tgt)
+            if not found:
+                continue
+            text = found[0]
+            if any(s in text for s in _SOURCE_SUFFIXES) and ("/" in text or "\\" in text):
+                bucket = paths
+            elif "::" in text:
+                bucket = symbols
+            else:
+                bucket = other
+            if text not in bucket and len(bucket) < limit:
+                bucket.append(text)
+        imm = _immediate_text(insn, cx86)
+        if imm and imm not in other and len(other) < limit:
+            other.append(imm)
+    return paths, symbols, other
+
+
+def describe_function(
+    binary_path: str | Path,
+    rva: int,
+    budget: int = 8192,
+    limit: int = 24,
+) -> dict[str, Any]:
+    """Label an unnamed function from the strings its own body references.
+
+    Every other function in this module answers with a bare address — "referenced from
+    0x748a05b" — and leaves identifying that function to the reader. This closes the
+    loop cheaply: one function is decoded, its rip targets are read as text, and the
+    result is classified so the caller can tell a ``__FILE__`` path from an arbitrary
+    literal instead of guessing.
+
+    ``function_bounds`` returning None means "no RUNTIME_FUNCTION", not "not a
+    function", so a leaf is described over ``budget`` bytes with ``has_bounds`` False
+    rather than refused.
+
+    Returns {rva, begin_rva, end_rva, size, has_bounds, source_paths, symbols,
+    strings, label}.
+    """
+    import capstone
+
+    img = PEImage(binary_path)
+    md = capstone.Cs(capstone.CS_ARCH_X86,
+                     capstone.CS_MODE_64 if img.is_64bit else capstone.CS_MODE_32)
+    md.detail = True
+
+    found = img.function_at(rva)
+    if found is not None:
+        begin, end = found[0], found[1]
+    else:
+        begin, end = rva, rva + budget
+    paths, symbols, other = _function_strings(img, md, begin, end, budget, limit)
+    label = " | ".join(paths or symbols or other)[:200]
+    return {
+        "rva": rva, "begin_rva": begin, "end_rva": end, "size": end - begin,
+        "has_bounds": found is not None,
+        "source_paths": paths, "symbols": symbols, "strings": other,
+        "label": label or "(no readable strings)",
+    }
+
+
+def function_callees(
+    binary_path: str | Path,
+    rva: int,
+    budget: int = 8192,
+    label: bool = True,
+) -> list[dict[str, Any]]:
+    """Direct callees of one function, each labelled by the strings in its body.
+
+    The other half of ``function_xrefs``: that answers "who reaches this", this answers
+    "what does this reach". Only ``call`` with an immediate target is listed — an
+    indirect ``call rax`` names no callee in the instruction stream, the same reason
+    a call/jmp scan cannot see a virtual method.
+
+    Returns [{from_rva, callee_rva, begin_rva, end_rva, size, has_bounds, label}],
+    deduplicated by callee and ordered by call site.
+    """
+    import capstone
+
+    img = PEImage(binary_path)
+    md = capstone.Cs(capstone.CS_ARCH_X86,
+                     capstone.CS_MODE_64 if img.is_64bit else capstone.CS_MODE_32)
+    md.detail = True
+
+    found = img.function_at(rva)
+    begin, end = (found[0], found[1]) if found else (rva, rva + budget)
+
+    out: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for insn in _decode_body(img, md, begin, end, budget):
+        if insn.mnemonic != "call" or not insn.op_str.startswith("0x"):
+            continue
+        callee = int(insn.op_str, 16) - img.image_base
+        if callee in seen:
+            continue
+        seen.add(callee)
+        bounds = img.function_at(callee)
+        c_begin, c_end = (bounds[0], bounds[1]) if bounds else (callee, callee + budget)
+        text = ""
+        if label:
+            paths, syms, other = _function_strings(img, md, c_begin, c_end, budget)
+            text = " | ".join(paths or syms or other)[:160]
+        out.append({
+            "from_rva": insn.address - img.image_base, "callee_rva": callee,
+            "begin_rva": c_begin, "end_rva": c_end, "size": c_end - c_begin,
+            "has_bounds": bounds is not None, "label": text,
+        })
+    return out
 
 
 def field_refs(

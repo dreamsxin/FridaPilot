@@ -470,6 +470,34 @@ def binary_vtable(binary_path: str, target_rva: int) -> dict[str, Any]:
 
 
 @mcp.tool()
+def binary_describe_function(binary_path: str, rva: int, budget: int = 8192) -> dict[str, Any]:
+    """Name an unnamed function from the strings its own body references. Every other xref
+    tool answers with a bare address and leaves identifying that function to you; this
+    closes the loop. DCHECK/NOTREACHED expand to __FILE__ and __PRETTY_FUNCTION__ and
+    histogram names are literals, so the strings a function points at usually name it.
+    Returns source_paths, symbols (strings containing ::), strings (everything else) and a
+    one-line label, kept separate because a release build strips most DCHECKs and then the
+    plain strings are all there is. has_bounds False means no .pdata entry (a leaf), in
+    which case `budget` bytes were decoded instead of the exact body."""
+    return _dispatch("binary_describe_function", {
+        "binary_path": binary_path, "rva": rva, "budget": budget,
+    })
+
+
+@mcp.tool()
+def binary_callees(binary_path: str, rva: int, budget: int = 8192,
+                   label: bool = True) -> dict[str, Any]:
+    """What a function calls, each callee labelled by the strings in its body - the other
+    half of binary_callers. Only direct `call 0x...` sites are listed: an indirect
+    `call rax` names no callee in the instruction stream, the same reason a call/jmp scan
+    cannot see a virtual method. Rows under "callees": from_rva, callee_rva, begin_rva,
+    end_rva, size, has_bounds, label."""
+    return _dispatch("binary_callees", {
+        "binary_path": binary_path, "rva": rva, "budget": budget, "label": label,
+    })
+
+
+@mcp.tool()
 def binary_index_build(
     binary_path: str, section: str = ".text", target_sections: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1077,6 +1105,17 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name == "binary_vtable":
         from fridapilot.tools.pe_rva import vtable_of_function
         return vtable_of_function(arguments["binary_path"], int(arguments["target_rva"]))
+
+    if name == "binary_describe_function":
+        from fridapilot.tools.pe_rva import describe_function
+        return describe_function(arguments["binary_path"], int(arguments["rva"]),
+                                 budget=int(arguments.get("budget", 8192)))
+
+    if name == "binary_callees":
+        from fridapilot.tools.pe_rva import function_callees
+        return {"callees": function_callees(arguments["binary_path"], int(arguments["rva"]),
+                                            budget=int(arguments.get("budget", 8192)),
+                                            label=bool(arguments.get("label", True)))}
 
     if name == "binary_index_build":
         from fridapilot.tools.rip_index import build_rip_index
