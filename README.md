@@ -127,6 +127,9 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 
 
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
+| `fp disasm view <file>` | **带符号与节区信息的反汇编列表**：每行同时给出 VA / 原始字节 / 指令 / 所属节区 / 所属函数；PE/ELF/Mach-O 通用，`--section` `--function` `--start/--end` 过滤，`--format group\|table\|json` | ❌ |
+| `fp disasm sections <file>` | 节区表：VA 区间、文件偏移、读写执行权限、落在其中的符号数 | ❌ |
+| `fp disasm symbols <file>` | 函数符号表：地址、大小、所属节区、名字来源（symtab/dynsym/export/coff/nlist） | ❌ |
 | `fp apk analyze <apk>` | APK 静态分析（manifest/权限/组件/native 库/签名/保护特征） | ❌ |
 | `fp apk dex <dex>` | DEX 分析（header/类/方法/字符串） | ❌ |
 | `fp apk protections <apk>` | Root/SSL pinning/Frida/模拟器检测与加固壳特征 | ❌ |
@@ -247,6 +250,37 @@ fp binary disasm-rva target.dll --rva 0x1000 -n 60 --symbols 0x1234abcd:parse_fi
 - xrefs 支持 rip-relative 数据引用扫描（定位"代码在哪里按 RVA 引用某字符串/全局"）
 
 典型工作流：`find-string-rva` 拿到字段名 RVA → `xrefs-rva` 找到解析该字段的代码 → `disasm-rva` 反汇编确认逻辑。Python SDK 亦可 `from fridapilot.tools.pe_rva import PEImage, disassemble_rva, xrefs_to_rva, find_string_rvas`。
+
+### 带符号与节区信息的反汇编查看器（`fp disasm`）
+
+`tools/disasm_view.py` 把「地址 → 节区 / 函数」的映射做成与格式无关的一层，PE / ELF / Mach-O 共用同一套输出：
+
+```bash
+# 按节区列（默认入口点，也可 --function / --start --end）
+fp disasm view target.dll --section .text --count 60
+
+# 表格视图，适合过滤与比对
+fp disasm view a.out --function main --format table
+
+# 机器可读，接其他工具
+fp disasm view lib.so --section .text --format json --output out.json
+
+# 地址映射本身
+fp disasm sections target.dll
+fp disasm symbols target.dll --pattern decrypt
+```
+
+每行同时携带：VA、文件偏移（PE 另有 RVA）、原始字节、指令、所属节区、所属函数与函数内偏移。
+
+几个刻意的取舍：
+
+- **地址一律是虚拟地址**（PE 已加 ImageBase，ELF 为链接期地址）；`fp binary disassemble` 的 `--address` 是文件偏移，两者不是一回事
+- **不可执行节区不反汇编**，按字符串 + 十六进制行渲染。把 `.rdata` 喂给反汇编器会得到一堆永不执行的「指令」，这是这类工具最容易误导人的地方
+- **函数边界分精确与推断两种**：PE 走 `.pdata`、ELF 走带 `st_size` 的 `STT_FUNC` 属于精确；PE 导出表、Mach-O `nlist` 不记录大小，只能用下一个符号推断末尾，这种情况标 `function_exact=false`（分组视图显示 `(implied bounds)`，表格视图名字后加 `?`）。两个符号之间的空隙不归任何函数，宁可留空也不硬派一个名字——`push rbp` 序言启发式在优化代码上不可靠，这里没有使用
+- **Mach-O 的代码判定看节区属性而非段权限**：`__TEXT` 是 r-x 且内含 `__cstring`，只看 `VM_PROT_EXECUTE` 会把字符串字面量当代码反汇编
+- **遇到数据字节会重新同步并把它标成 `bad`**，而不是像单次 `md.disasm` 那样在第一个无法解码的字节处静默结束（跳转表、对齐填充都会触发）
+- **范围有上限**（默认 200 行 / 512 KB 解码），截断时在输出里说明，不假装扫完了
+
 
 ### PE 逆向分析策略（决策顺序）
 

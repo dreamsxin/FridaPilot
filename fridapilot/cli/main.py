@@ -38,6 +38,7 @@ from fridapilot.cli.binary import binary_app
 from fridapilot.cli.bypass import bypass_app
 from fridapilot.cli.crypto import crypto_app
 from fridapilot.cli.dbg import dbg_cmd
+from fridapilot.cli.disasm import disasm_app
 from fridapilot.cli.inject import inject_cmd
 from fridapilot.cli.observe import observe_cmd
 from fridapilot.cli.ps import ps_cmd
@@ -60,6 +61,7 @@ app.add_typer(bypass_app, name="bypass", help="SSL pinning, anti-debug, anti-Fri
 app.command("report")(report_cmd)
 app.add_typer(crypto_app, name="crypto", help="Binary crypto analysis, key extraction, BCrypt hooking.")
 app.add_typer(binary_app, name="binary", help="Static binary analysis: PE/ELF/Mach-O, disassembly, strings, Go analysis.")
+app.add_typer(disasm_app, name="disasm", help="Annotated disassembly listing: address + section + function, PE/ELF/Mach-O.")
 app.add_typer(unpack_app, name="unpack", help="Packer detection, auto-unpacking, memory dump.")
 app.add_typer(apk_app, name="apk", help="APK/DEX static analysis: manifest, components, protections.")
 

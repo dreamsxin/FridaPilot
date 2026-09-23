@@ -241,3 +241,28 @@ If a signature changes, fix the docs in the same commit — the test will point 
 
 - **Frida sessions.** `fp dbg` commands act on the active session (`session switch`); state that
   is only written and never read is the bug to look for when a command "does nothing".
+- **Whether a section holds code is a per-format question, and Mach-O punishes the obvious
+  answer.** `__TEXT` is r-x and *contains* `__cstring`, so deciding code-vs-data from
+  `VM_PROT_EXECUTE` disassembles every string literal in the image. `disasm_view` additionally
+  requires `S_ATTR_PURE_INSTRUCTIONS`/`S_ATTR_SOME_INSTRUCTIONS` on the section; PE uses
+  `IMAGE_SCN_MEM_EXECUTE` and ELF `SHF_EXECINSTR`, where the flag alone decides. Data ranges are
+  rendered as strings and hex rows — handing `.rdata` to capstone produces instructions that
+  never execute, which is the most misleading output a listing can have. *(enforced:
+  `tests/test_disasm_view.py::test_macho_cstring_is_data_even_though_its_segment_is_executable`,
+  `::test_a_data_section_is_never_disassembled`)*
+- **A symbol with no recorded size cannot give a function's end.** ELF `STT_FUNC` carries
+  `st_size` and x64 PE has `.pdata`, so both are exact; a PE export and a Mach-O `nlist` carry
+  only an address, and the end is at best *implied* by the next symbol. `disasm_view` attributes
+  those but marks them `exact=False`, and attributes nothing in the gap between two sized
+  functions: the "nearest preceding symbol" shortcut labels padding and unowned code with a real
+  function's name, and nothing downstream can distinguish that from a measurement. Do not add a
+  `push rbp` prologue scan to fill the gaps — it is unreliable on optimised code, which is why
+  `function_bounds` reads `.pdata` in the first place. *(enforced:
+  `tests/test_disasm_view.py::test_a_sized_elf_symbol_gives_exact_bounds_and_a_gap_gives_none`,
+  `::test_macho_bounds_are_reported_as_implied_not_measured`)*
+- **`AddressOfEntryPoint == 0` is not an entry point at ImageBase.** A DLL with no DllMain
+  (ntdll.dll is one) has 0 there; treating it as an address aims the default listing at the DOS
+  header, which lies in no section, and the empty result reads as a broken image rather than a
+  missing argument. `ImageView.entry_va` is `None` then, and the listing falls back to the first
+  executable section and says so in `scope`. *(enforced:
+  `tests/test_disasm_view.py::test_an_image_without_an_entry_point_still_produces_a_default_listing`)*
