@@ -19,6 +19,10 @@ The interesting shapes for the view under test:
   ``helper`` therefore has no source attribution, which is the case a plain "bisect
   for the last row at or below this address" lookup gets wrong - it hands every
   later address the final row's file and line.
+* ``jumpy`` holds two data bytes that only its unconditional jump gets past. A linear
+  sweep decodes them (and resyncs into an instruction that does not exist); following
+  control flow does not. Both behaviours are asserted, so neither mode can silently
+  start doing the other one's thing.
 """
 
 from __future__ import annotations
@@ -35,6 +39,16 @@ HELPER_VA = TEXT_VA + 0x10  # sized STT_FUNC, the call target
 HELPER_SIZE = 0x03
 GAP_VA = TEXT_VA + 0x20     # inside .text, covered by no symbol
 RODATA_TEXT = "Hello, ELF"
+
+# A function whose body holds two data bytes that only an unconditional jump gets
+# past - the shape a jump table or an inlined constant produces. A linear sweep
+# decodes those bytes (and whatever follows them, at the wrong alignment); following
+# the jump skips them. Both facts are asserted, in both modes.
+JUMPY_VA = TEXT_VA + 0x30
+JUMPY_SIZE = 0x08
+JUMPY_DATA_VA = JUMPY_VA + 0x02   # the two bytes no control flow reaches
+JUMPY_RESUME_VA = JUMPY_VA + 0x04  # where the jump lands
+
 
 # Ground truth for the line program encoded below: (address, file, line) rows, and
 # the address where the sequence ends. Everything at or after DWARF_END has no line
@@ -55,6 +69,17 @@ _MAIN = (b"\x55" + b"\x48\x89\xe5"
          + b"\x5d" + b"\xc3")
 # helper: xor eax, eax; ret
 _HELPER = b"\x31\xc0\xc3"
+
+# jumpy:
+#   +0  eb 02     jmp +2    (rel8 is relative to the next instruction, so -> +4)
+#   +2  ff ff     data: invalid on its own, and `ff 31` (inc dword [rcx]) if a sweep
+#                 resyncs one byte later, which is how a linear pass ends up with a
+#                 plausible instruction that does not exist
+#   +4  31 c0     xor eax, eax
+#   +6  c3        ret
+#   +7  90        padding
+_JUMPY = b"\xeb\x02" + b"\xff\xff" + b"\x31\xc0" + b"\xc3" + b"\x90"
+
 
 _SHT_PROGBITS, _SHT_SYMTAB, _SHT_STRTAB, _SHT_NOBITS = 1, 2, 3, 8
 _SHF_WRITE, _SHF_ALLOC, _SHF_EXECINSTR = 0x1, 0x2, 0x4
@@ -146,11 +171,12 @@ def _debug_line() -> bytes:
 
 
 def _build() -> bytes:
-    text = bytearray(0x30)
+    text = bytearray(0x40)
     text[0:len(_MAIN)] = _MAIN
     text[HELPER_VA - TEXT_VA:HELPER_VA - TEXT_VA + len(_HELPER)] = _HELPER
     # The gap: valid instructions that belong to no symbol.
     text[GAP_VA - TEXT_VA:GAP_VA - TEXT_VA + 3] = b"\x90\x90\xc3"
+    text[JUMPY_VA - TEXT_VA:JUMPY_VA - TEXT_VA + len(_JUMPY)] = _JUMPY
     rodata = RODATA_TEXT.encode("ascii") + b"\x00"
     abbrev, info_cu, line = _debug_abbrev(), _debug_info(), _debug_line()
 
@@ -163,7 +189,7 @@ def _build() -> bytes:
         name_off[n] = cursor
         cursor += len(n) + 1
 
-    symnames = [b"", b"main", b"helper"]
+    symnames = [b"", b"main", b"helper", b"jumpy"]
     strtab = b"\x00".join(symnames) + b"\x00"
     sym_off = {}
     cursor = 0
@@ -175,6 +201,7 @@ def _build() -> bytes:
     symtab = struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)                     # null entry
     symtab += struct.pack("<IBBHQQ", sym_off[b"main"], info, 0, 1, MAIN_VA, MAIN_SIZE)
     symtab += struct.pack("<IBBHQQ", sym_off[b"helper"], info, 0, 1, HELPER_VA, HELPER_SIZE)
+    symtab += struct.pack("<IBBHQQ", sym_off[b"jumpy"], info, 0, 1, JUMPY_VA, JUMPY_SIZE)
 
     ehsize = 64
     off_text = ehsize

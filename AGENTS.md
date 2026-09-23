@@ -266,6 +266,19 @@ If a signature changes, fix the docs in the same commit — the test will point 
   missing argument. `ImageView.entry_va` is `None` then, and the listing falls back to the first
   executable section and says so in `scope`. *(enforced:
   `tests/test_disasm_view.py::test_an_image_without_an_entry_point_still_produces_a_default_listing`)*
+- **Recursive descent trades one lie for another, so both have to be visible.** A linear
+  sweep decodes a jump table, an inlined constant or alignment junk as code, and after a
+  mid-instruction resync it emits instructions that exist nowhere in the program (the fixture's
+  `eb 02 / ff ff / 31 c0` reads as `push qword ptr [rcx]` linearly). Following control flow avoids
+  that but **cannot prove** the bytes it skipped are not code, because an indirect jump's targets
+  are not in the instruction stream — so `mode="recursive"` emits `unreached` rows with a `span`
+  instead of dropping the ranges, and the walk is seeded with every function symbol in range, not
+  just the start: a virtual method, a binding-table entry or a stored callback is reached only
+  through a pointer and an entry-only walk omits all of them. Linear stays the default because it
+  is the only mode that shows every byte. *(enforced:
+  `tests/test_disasm_view.py::test_a_linear_sweep_decodes_data_that_control_flow_never_reaches`,
+  `::test_recursive_mode_accounts_for_every_byte_of_the_range`,
+  `::test_recursive_mode_seeds_every_function_symbol_not_only_the_entry`)*
 - **A DWARF line table covers ranges, not everything after its last row.** The table is a set of
   sequences, each closed by `DW_LNE_end_sequence`, and one sequence says nothing about addresses
   past its end. "Bisect for the last row at or below this address" - the obvious lookup - gives

@@ -289,7 +289,86 @@ def test_a_bss_range_reports_missing_data_instead_of_zeros(elf_image):
     assert [ln["kind"] for ln in lines] == ["nodata"]
 
 
+# ── linear vs recursive ──────────────────────────────────────
+
+
+def test_a_linear_sweep_decodes_data_that_control_flow_never_reaches(elf_image):
+    """The cost of linear mode, stated as a test so recursive mode has a baseline.
+
+    `jumpy` jumps over two data bytes. A linear pass cannot know that: it reports the
+    first byte as undecodable, resyncs one byte later and produces instructions that
+    exist nowhere in the program (`ff 31` decodes cleanly). This is the behaviour
+    recursive mode exists to avoid - and it is still the right default, because it is
+    the only mode that shows every byte.
+    """
+    result = disasm_listing(elf_image, function="jumpy", mode="linear")
+    addresses = [ln["va"] for ln in result["lines"]]
+    assert se.JUMPY_VA in addresses
+    assert any(ln["kind"] == "bad" for ln in result["lines"])
+    # An instruction starting inside the data, i.e. at an address that is not an
+    # instruction boundary in the real program.
+    assert any(se.JUMPY_DATA_VA < ln["va"] < se.JUMPY_RESUME_VA
+               and ln["kind"] == "insn" for ln in result["lines"])
+
+
+def test_recursive_mode_follows_the_jump_over_the_data(elf_image):
+    """Only reachable instructions are decoded, and the skipped bytes are declared."""
+    result = disasm_listing(elf_image, function="jumpy", mode="recursive")
+    assert result["mode"] == "recursive"
+    decoded = [ln for ln in result["lines"] if ln["kind"] == "insn"]
+    assert [ln["va"] for ln in decoded] == [
+        se.JUMPY_VA, se.JUMPY_RESUME_VA, se.JUMPY_RESUME_VA + 2]
+    assert decoded[0]["mnemonic"] == "jmp"
+    assert decoded[0]["target_va"] == se.JUMPY_RESUME_VA
+    assert decoded[-1]["mnemonic"] == "ret"
+
+    skipped = [ln for ln in result["lines"] if ln["kind"] == "unreached"]
+    gap = next(ln for ln in skipped if ln["va"] == se.JUMPY_DATA_VA)
+    assert gap["span"] == se.JUMPY_RESUME_VA - se.JUMPY_DATA_VA
+    assert "not reached" in gap["text"]
+
+
+def test_recursive_mode_accounts_for_every_byte_of_the_range(elf_image):
+    """Structural invariant: decoded + unreached covers the request, with no overlap.
+
+    Skipping bytes silently would make a function look shorter than it is, which is
+    the failure mode that makes a recursive listing dangerous rather than merely
+    incomplete.
+    """
+    view = ImageView(elf_image)
+    text = view.find_section(".text")
+    result = disasm_listing(elf_image, section=".text", mode="recursive", count=500,
+                            view=view)
+    cursor = text.va
+    for ln in result["lines"]:
+        assert ln["va"] == cursor, f"gap or overlap at 0x{cursor:x}"
+        cursor += ln["span"] if ln["kind"] == "unreached" else len(ln["bytes_hex"]) // 2
+    assert cursor == text.end_va
+
+
+def test_recursive_mode_seeds_every_function_symbol_not_only_the_entry(elf_image):
+    """A function nothing branches to is still listed, because symbols seed the walk.
+
+    Reachability alone is not enough: a virtual method, a binding-table entry or a
+    stored callback is only ever reached through a pointer, so an entry-only recursive
+    pass omits all of them (the same blind spot `pe_rva.function_xrefs` exists for).
+    `jumpy` is the fixture's case - no call or jmp anywhere targets it.
+    """
+    result = disasm_listing(elf_image, section=".text", mode="recursive", count=500)
+    assert all(ln["target_va"] != se.JUMPY_VA for ln in result["lines"]), \
+        "fixture changed: something now branches to jumpy, so seeding is not tested"
+    reached = {ln["va"] for ln in result["lines"] if ln["kind"] == "insn"}
+    assert se.JUMPY_VA in reached
+    assert se.HELPER_VA in reached
+
+
+def test_an_unknown_mode_is_reported(elf_image):
+    assert "unknown mode" in disasm_listing(elf_image, section=".text",
+                                            mode="descent")["error"]
+
+
 # ── range handling ───────────────────────────────────────────
+
 
 
 def test_lines_stay_inside_the_requested_scope(pe_image, elf_image):
@@ -378,6 +457,7 @@ def test_cli_commands_are_registered_and_run(pe_image, elf_image):
                  ["disasm", "view", path, "--format", "table", "--count", "5"],
                  ["disasm", "view", elf_image, "--function", "main", "--source"],
                  ["disasm", "view", elf_image, "--source", "--format", "table"],
+                 ["disasm", "view", elf_image, "--section", ".text", "--mode", "recursive"],
                  ["disasm", "sections", path],
                  ["disasm", "symbols", path]):
         result = runner.invoke(app, args)

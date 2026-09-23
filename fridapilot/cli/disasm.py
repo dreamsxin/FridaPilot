@@ -81,6 +81,8 @@ def _instruction_text(line: dict) -> str:
         return f'"{line["text"]}"'
     if line["kind"] == "bad":
         return "(undecodable byte)"
+    if line["kind"] == "unreached":
+        return f"... {line['text']}"
     return line.get("text", "")
 
 
@@ -94,7 +96,8 @@ def _print_header(out: Console, result: dict) -> None:
     out.print(f"[bold]{result['path']}[/bold]  {result['format'].upper()} "
               f"{result['arch']}/{result['bits']}  "
               f"image base 0x{result['image_base']:x}"
-              + (f"  scope: {result['scope']}" if result.get("scope") else ""))
+              + (f"  scope: {result['scope']}" if result.get("scope") else "")
+              + (f"  mode: {result['mode']}" if result.get("mode") else ""))
     for note in result.get("notes", []):
         out.print(f"[dim]note: {_safe(note, 300)}[/dim]")
 
@@ -173,6 +176,8 @@ def view_cmd(
                                     help="Show raw bytes in the table view."),
     source: bool = typer.Option(False, "--source", "-S",
                                 help="Resolve DWARF file:line per line (ELF only)."),
+    mode: str = typer.Option("linear", "--mode", "-m",
+                             help="linear (decode every byte) or recursive (follow branches)."),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colour."),
     output: str = typer.Option("", "--output", "-o", help="Write to a file instead of stdout."),
 ) -> None:
@@ -182,6 +187,11 @@ def view_cmd(
     not file offsets - unlike `fp binary disassemble`. Non-executable sections are
     shown as strings and hex rows rather than decoded, because feeding .rdata to a
     disassembler yields instructions that never execute.
+
+    --mode recursive decodes only what control flow reaches (from the range start and
+    every function symbol in it) and marks the rest as unreached, which is how a jump
+    table inside a body stops turning into bogus instructions. It cannot prove the
+    skipped bytes are not code, so it shows the gaps instead of hiding them.
 
     Default scope is the entry point; pass --section, --function or --start/--end.
     """
@@ -200,6 +210,7 @@ def view_cmd(
             end=int(end, 0) if end else None,
             count=count,
             source=source,
+            mode=mode,
         )
     except ValueError as exc:
         err_console.print(f"[red]{exc}[/red]")

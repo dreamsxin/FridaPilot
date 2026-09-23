@@ -807,6 +807,133 @@ def _data_lines(view: ImageView, start: int, end: int, count: int,
     return lines
 
 
+def _is_return(insn, arch: str) -> bool:
+    if arch in ("x86", "x64"):
+        return insn.mnemonic in ("ret", "retf", "iret", "iretd", "iretq", "hlt", "ud2")
+    return insn.mnemonic in ("ret", "eret") or insn.op_str.strip() in ("lr", "x30")
+
+
+def _flow(insn, arch: str) -> tuple[str, int | None]:
+    """Control-flow class of an instruction and its direct target.
+
+    ``("stop", None)`` ends a path, ``("jump", va)`` continues only at the target,
+    ``("branch", va)`` continues both at the target and after the instruction, and
+    ``("call", va)`` queues the target but keeps going. An indirect branch has no
+    target in the instruction stream, so it ends the path: pretending the fall-through
+    is reachable is exactly how a "recursive" pass starts inventing instructions.
+    """
+    target = _branch_target(insn, arch)
+    if _is_return(insn, arch):
+        return "stop", None
+    if arch in ("x86", "x64"):
+        if insn.mnemonic == "jmp":
+            return ("jump", target) if target is not None else ("stop", None)
+        if insn.mnemonic == "call":
+            return "call", target
+        if insn.mnemonic.startswith("j") or insn.mnemonic.startswith("loop"):
+            return ("branch", target) if target is not None else ("next", None)
+    else:
+        if insn.mnemonic in ("b", "bx"):
+            return ("jump", target) if target is not None else ("stop", None)
+        if insn.mnemonic in ("bl", "blx"):
+            return "call", target
+        if insn.mnemonic.startswith("b") or insn.mnemonic.startswith("cb") \
+                or insn.mnemonic.startswith("tb"):
+            return ("branch", target) if target is not None else ("next", None)
+    return "next", None
+
+
+def _recursive_lines(view: ImageView, md, start: int, end: int, count: int,
+                     source: bool = False) -> list[dict]:
+    """Decode only what control flow reaches from ``start`` and the symbols in range.
+
+    Why not just sweep linearly: a jump table, an inlined constant or alignment junk
+    inside a function body is decoded by a linear pass as if it were code, and after a
+    mid-instruction resync the output contains instructions that exist nowhere in the
+    program. Following branches never produces those.
+
+    Why seed with every function symbol in the range and not only ``start``: a
+    virtual method, a binding-table entry or a stored callback is reached through a
+    pointer, so no branch anywhere names it (the same reason ``pe_rva.function_xrefs``
+    exists). Entry-only recursion silently omits all of them.
+
+    What recursive mode cannot do is prove the bytes it skipped are *not* code - an
+    indirect jump hides its targets. Unreached ranges are therefore emitted as
+    ``unreached`` rows rather than dropped, so the gap is visible instead of looking
+    like a shorter function.
+    """
+    seeds = [start] + [s.va for s in view.symbols() if start <= s.va < end]
+    queue = list(dict.fromkeys(seeds))
+    rows: dict[int, dict] = {}
+    covered: set[int] = set()
+    # Bounded so that a whole-.text request cannot run away: the caller asked for
+    # `count` lines, and sorting happens afterwards, so decoding a small multiple is
+    # enough to fill the page.
+    budget = max(count * 4, 1000)
+
+    while queue and len(rows) < budget:
+        va = queue.pop()
+        while start <= va < end and va not in rows:
+            data = view.read(va, 16)
+            if not data:
+                break
+            insn = next(md.disasm(data, va), None)
+            if insn is None:
+                rows[va] = _line(view, va, data[:1], "bad", source=source)
+                covered.add(va)
+                break
+            kind, target = _flow(insn, view.arch)
+            rows[va] = _line(view, insn.address, insn.bytes, "insn",
+                             mnemonic=insn.mnemonic, op_str=insn.op_str,
+                             target_va=target if target is not None
+                             else _rip_target(insn, view.arch),
+                             source=source)
+            covered.update(range(va, va + insn.size))
+            if target is not None and start <= target < end and target not in rows:
+                queue.append(target)
+            if kind in ("stop", "jump"):
+                break
+            va += insn.size
+
+    out = [rows[va] for va in sorted(rows)]
+    out = _fill_unreached(view, out, start, end, covered)
+    return out[:count]
+
+
+def _fill_unreached(view: ImageView, rows: list[dict], start: int, end: int,
+                    covered: set[int]) -> list[dict]:
+    """Insert one ``unreached`` row per contiguous range no path ever decoded."""
+    merged: list[dict] = []
+    cursor = start
+    for row in rows:
+        if row["va"] > cursor:
+            merged.append(_unreached_row(view, cursor, row["va"]))
+        merged.append(row)
+        cursor = max(cursor, row["va"] + max(len(row["bytes_hex"]) // 2, 1))
+    if cursor < end and covered:
+        merged.append(_unreached_row(view, cursor, end))
+    return merged
+
+
+def _unreached_row(view: ImageView, start: int, end: int) -> dict:
+    sec = view.section_at(start)
+    attr = view.attribution(start)
+    span = end - start
+    return {
+        "va": start, "file_offset": view.file_offset(start),
+        "section": sec.name if sec else "",
+        "function": attr.name if attr else "",
+        "func_offset": attr.offset if attr else None,
+        "function_exact": attr.exact if attr else None,
+        "kind": "unreached", "bytes_hex": "", "mnemonic": "", "op_str": "",
+        # The span is a field, not only prose in `text`: a caller checking that the
+        # listing accounts for every byte of the range should not have to parse English.
+        "span": span,
+        "text": f"{span} byte{'s' if span != 1 else ''} not reached by any control flow",
+        "target_va": None, "target": "", "source_file": None, "source_line": None,
+    }
+
+
 def _line(view: ImageView, va: int, raw: bytes, kind: str, mnemonic: str = "",
           op_str: str = "", text: str = "", target_va: int | None = None,
           source: bool = False) -> dict:
@@ -825,6 +952,7 @@ def _line(view: ImageView, va: int, raw: bytes, kind: str, mnemonic: str = "",
         "mnemonic": mnemonic,
         "op_str": op_str,
         "text": text,
+        "span": None,
         "target_va": target_va,
         "target": _annotate(view, target_va) if target_va is not None else "",
         "source_file": where[0] if where else None,
@@ -843,6 +971,7 @@ def disasm_listing(
     end: int | None = None,
     count: int = DEFAULT_COUNT,
     source: bool = False,
+    mode: str = "linear",
     view: ImageView | None = None,
 ) -> dict[str, Any]:
     """Annotated listing of a range, function or section.
@@ -858,13 +987,18 @@ def disasm_listing(
         start/end: explicit VA range. ``start`` alone uses ``count`` to stop.
         count: maximum number of lines.
         source: resolve DWARF file/line per line (ELF only; costs a DWARF parse).
+        mode: ``linear`` decodes every byte in order; ``recursive`` follows branches
+            from the range start and every function symbol in it, and reports what no
+            path reached as ``unreached`` rows instead of decoding it.
         view: reuse an existing ``ImageView`` instead of re-parsing the file.
 
     Returns:
         {path, format, arch, bits, image_base, entry_va, start_va, end_va,
-         scope, truncated, notes, lines}
+         scope, mode, truncated, notes, lines}
     """
     view = view or ImageView(binary_path)
+    if mode not in ("linear", "recursive"):
+        return _empty(view, error=f"unknown mode {mode!r} (linear, recursive)")
     scope = ""
     if function:
         sym = view.find_function(function)
@@ -914,7 +1048,10 @@ def disasm_listing(
         room = count - len(lines)
         if sec.executable:
             md = _capstone_for(view.arch)
-            chunk = _code_lines(view, md, va, stop, room, source)
+            if mode == "recursive":
+                chunk = _recursive_lines(view, md, va, stop, room, source)
+            else:
+                chunk = _code_lines(view, md, va, stop, room, source)
         else:
             chunk = _data_lines(view, va, stop, room, source)
         if not chunk:
@@ -924,18 +1061,25 @@ def disasm_listing(
                           "text": "no file data (uninitialized)", "function": "",
                           "file_offset": None, "func_offset": None,
                           "function_exact": None, "target_va": None, "target": "",
+                          "span": stop - va,
                           "source_file": None, "source_line": None})
             va = stop
             continue
         lines.extend(chunk)
-        last = chunk[-1]
-        va = last["va"] + max(len(last["bytes_hex"]) // 2, 1)
+        if mode == "recursive" and sec.executable:
+            # A recursive chunk accounts for the whole sub-range - decoded rows plus
+            # `unreached` rows - unless the line cap trimmed it, in which case the
+            # loop is about to end and the last address is what was actually reached.
+            va = chunk[-1]["va"] if len(chunk) >= room else stop
+        else:
+            last = chunk[-1]
+            va = last["va"] + max(len(last["bytes_hex"]) // 2, 1)
     if va < end:
         truncated = True
 
     out = _empty(view)
     out.update({
-        "start_va": start, "end_va": end, "scope": scope,
+        "start_va": start, "end_va": end, "scope": scope, "mode": mode,
         "truncated": truncated, "lines": lines,
     })
     if truncated:
@@ -949,8 +1093,8 @@ def _empty(view: ImageView, error: str | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "path": view.path, "format": view.format, "arch": view.arch,
         "bits": view.bits, "image_base": view.image_base, "entry_va": view.entry_va,
-        "start_va": None, "end_va": None, "scope": "", "truncated": False,
-        "notes": list(view.notes), "lines": [],
+        "start_va": None, "end_va": None, "scope": "", "mode": "linear",
+        "truncated": False, "notes": list(view.notes), "lines": [],
     }
     if error:
         out["error"] = error
