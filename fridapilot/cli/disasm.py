@@ -14,8 +14,9 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.markup import escape
 from rich.table import Table
+
+from fridapilot.cli.binary import _console_safe
 
 disasm_app = typer.Typer(no_args_is_help=True)
 
@@ -100,11 +101,16 @@ def _emit_csv(result: dict, output: str) -> None:
             err_console.print(f"[dim]wrote {output}[/dim]")
 
 
-def _safe(text: str, limit: int = 120) -> str:
-    """Make a string lifted out of a binary printable on THIS console."""
-    cleaned = "".join(c if c.isprintable() else "." for c in text[:limit])
-    codec = getattr(console.file, "encoding", None) or "utf-8"
-    return escape(cleaned.encode(codec, "replace").decode(codec, "replace"))
+def _safe(text: str, limit: int = 120, out: Console | None = None) -> str:
+    """Console-safe text, shared with ``fp binary``: unprintables, codec and markup.
+
+    A thin adapter over ``cli.binary._console_safe`` rather than a second copy - the two
+    failure modes it guards against (a `[` in binary data becoming a Rich tag, a byte
+    the console codec cannot encode) are identical here, and one of them was found the
+    hard way once already. Only the default length differs: a listing row has more room
+    than a search hit.
+    """
+    return _console_safe(text, limit, out)
 
 
 def _instruction_text(line: dict) -> str:
@@ -132,7 +138,7 @@ def _print_header(out: Console, result: dict) -> None:
               + (f"  scope: {result['scope']}" if result.get("scope") else "")
               + (f"  mode: {result['mode']}" if result.get("mode") else ""))
     for note in result.get("notes", []):
-        out.print(f"[dim]note: {_safe(note, 300)}[/dim]")
+        out.print(f"[dim]note: {_safe(note, 300, out)}[/dim]")
 
 
 def _render_group(out: Console, result: dict) -> None:
@@ -143,7 +149,11 @@ def _render_group(out: Console, result: dict) -> None:
             cur_section = line["section"]
             cur_function = None
             style = _section_style(cur_section)
-            out.print(f"\n[{style} bold]{cur_section or '(no section)'}[/{style} bold]")
+            # Section names come out of the image too: a PE 8-byte name or an ELF
+            # .shstrtab entry can contain '[', which Rich reads as a markup tag and
+            # then raises MarkupError on.
+            shown = _safe(cur_section, 60, out) if cur_section else "(no section)"
+            out.print(f"\n[{style} bold]{shown}[/{style} bold]")
         if line["function"] != cur_function:
             cur_function = line["function"]
             cur_source = None
@@ -151,7 +161,7 @@ def _render_group(out: Console, result: dict) -> None:
                 # '?' marks an implied end: the symbol source recorded no size, so the
                 # function was attributed from the preceding symbol. Not a measurement.
                 mark = "" if line["function_exact"] else " [yellow](implied bounds)[/yellow]"
-                out.print(f"  [cyan bold]{_safe(cur_function)}[/cyan bold]:{mark}")
+                out.print(f"  [cyan bold]{_safe(cur_function, 120, out)}[/cyan bold]:{mark}")
             else:
                 out.print("  [dim](no symbol)[/dim]")
         source = _source_label(line)
@@ -159,11 +169,12 @@ def _render_group(out: Console, result: dict) -> None:
             # Printed once per change, the way objdump -S groups by source line -
             # repeating it on every instruction buries the disassembly.
             cur_source = source
-            out.print(f"    [magenta]; {_safe(source, 120)}[/magenta]")
-        target = f"   [cyan]; {_safe(line['target'], 90)}[/cyan]" if line["target"] else ""
+            out.print(f"    [magenta]; {_safe(source, 120, out)}[/magenta]")
+        target = (f"   [cyan]; {_safe(line['target'], 90, out)}[/cyan]"
+                  if line["target"] else "")
         out.print(f"    [dim]{line['va']:016x}[/dim]  "
                   f"[dim]{line['bytes_hex'][:32]:<32s}[/dim]  "
-                  f"{_safe(_instruction_text(line))}{target}")
+                  f"{_safe(_instruction_text(line), 120, out)}{target}")
 
 
 def _render_table(out: Console, result: dict, show_bytes: bool, show_source: bool) -> None:
@@ -186,10 +197,11 @@ def _render_table(out: Console, result: dict, show_bytes: bool, show_source: boo
         row = [f"0x{line['va']:x}"]
         if show_bytes:
             row.append(line["bytes_hex"][:32])
-        row += [_safe(_instruction_text(line), 90),
-                f"[{style}]{line['section']}[/{style}]", _safe(func, 80)]
+        row += [_safe(_instruction_text(line), 90, out),
+                f"[{style}]{_safe(line['section'], 60, out)}[/{style}]",
+                _safe(func, 80, out)]
         if show_source:
-            row.append(_safe(_source_label(line), 80))
+            row.append(_safe(_source_label(line), 80, out))
         table.add_row(*row)
     out.print(table)
 
@@ -308,7 +320,7 @@ def sections_cmd(
     for sec in result["sections"]:
         style = _section_style(sec["name"])
         table.add_row(
-            f"[{style}]{sec['name']}[/{style}]",
+            f"[{style}]{_safe(sec['name'], 60)}[/{style}]",
             f"0x{sec['va']:x}", f"0x{sec['end_va']:x}", f"0x{sec['size']:x}",
             "-" if sec["file_offset"] < 0 else f"0x{sec['file_offset']:x}",
             sec["perms"], str(sec["symbols"]))
@@ -354,6 +366,6 @@ def symbols_cmd(
             name += f" [dim](+{len(sym['aliases'])} alias)[/dim]"
         table.add_row(f"0x{sym['va']:x}",
                       f"0x{sym['size']:x}" if sym["size"] else "[dim]?[/dim]",
-                      f"[{_section_style(sym['section'])}]{sym['section']}[/]",
+                      f"[{_section_style(sym['section'])}]{_safe(sym['section'], 60)}[/]",
                       sym["source"], name)
     console.print(table)

@@ -10,6 +10,7 @@ presenting an implied function boundary as a measured one.
 
 from __future__ import annotations
 
+import struct
 import sys
 
 import capstone
@@ -502,14 +503,70 @@ def test_a_range_spanning_sections_switches_rendering_and_skips_the_hole(pe_imag
 
 
 def test_unknown_names_and_formats_are_reported_not_raised(pe_image, tmp_path):
+    """Bad arguments and non-executable input give a message, never a traceback."""
     path, _placed, _end = pe_image
     assert "no section named" in disasm_listing(path, section=".nope")["error"]
     assert "no symbol named" in disasm_listing(path, function="nope")["error"]
+    # A section list that is all separators used to reach `start + count * 16` with
+    # start still None, i.e. a TypeError out of the tool layer.
+    assert "no section name" in disasm_listing(path, section=",")["error"]
+    assert "no section name" in disasm_listing(path, section="  ")["error"]
 
     junk = tmp_path / "junk.bin"
     junk.write_bytes(b"not an executable at all")
     with pytest.raises(ValueError):
         ImageView(junk)
+
+
+def test_a_damaged_image_raises_valueerror_not_the_parser_s_own_type(tmp_path):
+    """Truncated or hand-edited files are normal input, so one error type covers them.
+
+    pefile raises PEFormatError, pyelftools raises ELFError and hand-rolled struct
+    parsing raises struct.error; none is a ValueError, so a CLI that catches ValueError
+    printed a traceback for exactly the files a reverse engineer feeds it most.
+    """
+    cases = {
+        "trunc.macho": struct.pack("<I", 0xFEEDFACF) + b"\x07\x00\x00\x01",
+        "trunc-fat.macho": struct.pack(">I", 0xCAFEBABE) + b"\x00\x00\x00\x01",
+        "trunc.exe": b"MZ" + b"\x00" * 40,
+        "trunc.elf": b"\x7fELF" + b"\x02\x01\x01\x00" + b"\x00" * 16,
+    }
+    for name, blob in cases.items():
+        target = tmp_path / name
+        target.write_bytes(blob)
+        with pytest.raises(ValueError):
+            ImageView(target)
+
+
+def test_a_section_name_from_the_image_cannot_break_the_renderer():
+    """Section names are attacker-controlled text; Rich reads `[` as a markup tag.
+
+    Function names and instruction text already went through the escaping helper, so
+    the section column was the one place a crafted name could raise MarkupError instead
+    of printing.
+    """
+    import io
+
+    from rich.console import Console
+
+    from fridapilot.cli.disasm import _render_group, _render_table
+
+    result = {
+        "path": "x", "format": "pe", "arch": "x64", "bits": 64, "image_base": 0,
+        "scope": "", "mode": "linear", "notes": [], "truncated": False,
+        "lines": [{
+            "va": 0x1000, "rva": 0x1000, "file_offset": 0x400,
+            "section": ".te[/x]xt", "function": "f[/y]n", "func_offset": 0,
+            "function_exact": True, "kind": "insn", "bytes_hex": "90",
+            "mnemonic": "nop", "op_str": "", "text": "", "span": None,
+            "target_va": None, "target": "", "source_file": None, "source_line": None,
+        }],
+    }
+    for render in (_render_group, lambda out, res: _render_table(out, res, True, False)):
+        out = Console(file=io.StringIO(), no_color=True, width=200)
+        render(out, result)                      # must not raise MarkupError
+        assert ".te[/x]xt" in out.file.getvalue()
+
 
 
 def test_pe_lines_carry_both_the_rva_and_the_file_offset(pe_image):

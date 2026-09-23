@@ -27,16 +27,20 @@ def _emit_json(obj) -> None:
     sys.stdout.write(_json.dumps(obj, indent=2, default=str) + "\n")
 
 
-def _console_safe(text: str, limit: int = 100) -> str:
+def _console_safe(text: str, limit: int = 100, out: Console | None = None) -> str:
     """Make a string lifted out of a binary printable on THIS console.
 
     Two independent ways it blows up otherwise, both seen: a `[` in the data starts a
     Rich markup tag, and a character the console codec cannot encode raises on write
     (a cp936 stdout killed `find-string-rva` on a mojibake .rdata run). Unprintables
     become dots, unencodable characters are replaced, markup is escaped.
+
+    ``out`` names the console the text is headed for: rendering into a UTF-8 file while
+    testing encodability against a cp936 stdout replaces characters the file could have
+    held.
     """
     cleaned = "".join(c if c.isprintable() else "." for c in text[:limit])
-    codec = getattr(console.file, "encoding", None) or "utf-8"
+    codec = getattr((out or console).file, "encoding", None) or "utf-8"
     return escape(cleaned.encode(codec, "replace").decode(codec, "replace"))
 
 

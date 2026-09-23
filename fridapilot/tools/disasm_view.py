@@ -33,6 +33,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from fridapilot.tools.binary_analysis import (
+    FAT_MAGIC,
+    FAT_MAGIC_64,
+    MH_MAGIC,
+    MH_MAGIC_64,
+    capstone_for,
+)
+
 # A listing is read by a human or pasted into a model context; both stop being served
 # by more than a few hundred lines. The byte cap is the real guard: a whole-.text
 # request on a Chromium-sized DLL is 100+ MB of decode, and capstone costs ~2.7 s/MB.
@@ -91,11 +99,6 @@ _PE_MACHINES = {0x14C: ("x86", 32), 0x8664: ("x64", 64), 0x1C0: ("arm", 32),
 _MACHO_CPUS = {7: ("x86", 32), 0x01000007: ("x64", 64), 12: ("arm", 32),
                0x0100000C: ("arm64", 64)}
 
-_MH_MAGIC = 0xFEEDFACE
-_MH_MAGIC_64 = 0xFEEDFACF
-_FAT_MAGIC = 0xCAFEBABE
-_FAT_MAGIC_64 = 0xCAFEBABF
-
 
 def _perm_string(read: bool, write: bool, execute: bool) -> str:
     return ("r" if read else "-") + ("w" if write else "-") + ("x" if execute else "-")
@@ -130,6 +133,13 @@ class ImageView:
 
     One instance per file: the PE path reuses the cached ``PEImage`` (which holds the
     whole file), and the ELF / Mach-O paths read the file once into ``self._data``.
+    The PE file handle is **not** owned here - ``pe_rva`` keeps a process-wide cache of
+    at most four ``PEImage`` instances and hands the same one to every caller, so
+    closing it from this class would break the other holders.
+
+    Every failure to parse an image is raised as ``ValueError``: ``pefile``,
+    ``pyelftools`` and ``struct`` each have their own exception type, and a CLI that
+    wants one clear message per bad input should not have to know all three.
     """
 
     def __init__(self, path: str | Path):
@@ -155,16 +165,28 @@ class ImageView:
         if len(head) < 4:
             raise ValueError(f"{self.path}: too small to be an executable")
 
-        if head[:2] == b"MZ":
-            self._load_pe()
-        elif head[:4] == b"\x7fELF":
-            self._load_elf()
-        elif struct.unpack_from("<I", head, 0)[0] in (_MH_MAGIC, _MH_MAGIC_64) or \
-                struct.unpack_from(">I", head, 0)[0] in (_FAT_MAGIC, _FAT_MAGIC_64):
-            self._load_macho()
-        else:
+        try:
+            if head[:2] == b"MZ":
+                self._load_pe()
+            elif head[:4] == b"\x7fELF":
+                self._load_elf()
+            elif struct.unpack_from("<I", head, 0)[0] in (MH_MAGIC, MH_MAGIC_64) or \
+                    struct.unpack_from(">I", head, 0)[0] in (FAT_MAGIC, FAT_MAGIC_64):
+                self._load_macho()
+            else:
+                raise ValueError(
+                    f"{self.path}: not a PE, ELF or Mach-O image (magic {head[:4].hex()})")
+        except ValueError:
+            raise
+        except Exception as exc:
+            # A truncated or hand-edited image is normal input for this tool, and the
+            # third-party parsers signal it with their own types (pefile.PEFormatError,
+            # elftools ELFError, struct.error). Letting those through means the CLI
+            # prints a traceback for a file the user knows is damaged.
             raise ValueError(
-                f"{self.path}: not a PE, ELF or Mach-O image (magic {head[:4].hex()})")
+                f"{self.path}: cannot parse as {self.format or 'executable'} "
+                f"({type(exc).__name__}: {exc})") from exc
+
 
         self.sections.sort(key=lambda s: s.va)
         self._merge_named()
@@ -230,14 +252,20 @@ class ImageView:
                 "unavailable for this image")
 
     def _pe_pdb_path(self, pe) -> str:
-        """PDB path from the CodeView debug directory, or "" when absent."""
+        """PDB path from the CodeView debug directory, or "" when absent.
+
+        ``pe_metadata`` also digs this out, together with the GUID and age needed for a
+        symbol-server lookup; that version needs the whole file's bytes. Here only the
+        path is wanted, as a note explaining why the listing has no line numbers.
+        """
         import pefile
 
         if not hasattr(pe, "DIRECTORY_ENTRY_DEBUG"):
             try:
                 pe.parse_data_directories(
                     directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_DEBUG"]])
-            except Exception:
+            except Exception as exc:
+                self.notes.append(f"debug directory could not be parsed: {exc}")
                 return ""
         for dbg in getattr(pe, "DIRECTORY_ENTRY_DEBUG", []):
             entry = getattr(dbg, "entry", None)
@@ -258,7 +286,10 @@ class ImageView:
             try:
                 pe.parse_data_directories(
                     directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]])
-            except Exception:
+            except Exception as exc:
+                # Without this note the image looks stripped, and "no exports" is a
+                # very different conclusion from "the export directory is damaged".
+                self.notes.append(f"export directory could not be parsed: {exc}")
                 return
         for exp in getattr(getattr(pe, "DIRECTORY_ENTRY_EXPORT", None), "symbols", []):
             if not exp.address:
@@ -371,24 +402,40 @@ class ImageView:
 
     def _load_macho(self) -> None:
         self.format = "macho"
-        data = Path(self.path).read_bytes()
-        if struct.unpack_from(">I", data, 0)[0] in (_FAT_MAGIC, _FAT_MAGIC_64):
-            nfat = struct.unpack_from(">I", data, 4)[0]
-            if not nfat:
-                raise ValueError(f"{self.path}: fat header declares 0 architectures")
-            slice_off = struct.unpack_from(">I", data, 16)[0]
-            data = data[slice_off:]
-            self.notes.append(
-                f"fat binary with {nfat} slices: showing the first one only")
+        # Read the fat header first and then only the slice that will be used: reading
+        # the whole file and slicing it afterwards holds two copies of a universal
+        # binary in memory at once, and those are routinely hundreds of MB.
+        with open(self.path, "rb") as f:
+            head = f.read(20)
+            if len(head) >= 20 and struct.unpack_from(">I", head, 0)[0] in (FAT_MAGIC,
+                                                                            FAT_MAGIC_64):
+                nfat = struct.unpack_from(">I", head, 4)[0]
+                if not nfat:
+                    raise ValueError(f"{self.path}: fat header declares 0 architectures")
+                slice_off = struct.unpack_from(">I", head, 16)[0]
+                f.seek(slice_off)
+                data = f.read()
+                if not data:
+                    raise ValueError(
+                        f"{self.path}: fat slice offset 0x{slice_off:x} is past the file end")
+                self.notes.append(
+                    f"fat binary with {nfat} slices: showing the first one only")
+            else:
+                f.seek(0)
+                data = f.read()
         self._data = data
 
+        if len(data) < 28:
+            raise ValueError(f"{self.path}: truncated Mach-O header")
         magic = struct.unpack_from("<I", data, 0)[0]
-        if magic == _MH_MAGIC_64:
+        if magic == MH_MAGIC_64:
             self.bits, hdr_size = 64, 32
-        elif magic == _MH_MAGIC:
+        elif magic == MH_MAGIC:
             self.bits, hdr_size = 32, 28
         else:
             raise ValueError(f"{self.path}: unsupported Mach-O magic 0x{magic:x}")
+        if len(data) < hdr_size:
+            raise ValueError(f"{self.path}: truncated Mach-O header")
         cpu = struct.unpack_from("<I", data, 4)[0]
         self.arch, self.bits = _MACHO_CPUS.get(cpu, (self.arch or "x64", self.bits))
         ncmds = struct.unpack_from("<I", data, 16)[0]
@@ -398,17 +445,27 @@ class ImageView:
             if offset + 8 > len(data):
                 break
             cmd, cmd_size = struct.unpack_from("<II", data, offset)
-            if cmd_size < 8:
+            # The declared size has to fit in the file before anything inside the
+            # command is read: a truncated image otherwise raises struct.error from
+            # deep inside the segment parser, which is not the ValueError this module
+            # promises its callers.
+            if cmd_size < 8 or offset + cmd_size > len(data):
+                self.notes.append(
+                    f"load command at 0x{offset:x} extends past the file end; "
+                    "stopped parsing there")
                 break
             if cmd in (0x1, 0x19):
-                self._macho_segment(data, offset, is_64=cmd == 0x19)
+                self._macho_segment(data, offset, is_64=cmd == 0x19, limit=offset + cmd_size)
             elif cmd == 0x2:
-                self._macho_symtab(data, offset)
+                self._macho_symtab(data, offset, limit=offset + cmd_size)
             offset += cmd_size
         if not self._named:
             self.notes.append("no LC_SYMTAB entries: function attribution unavailable")
 
-    def _macho_segment(self, data: bytes, offset: int, is_64: bool) -> None:
+    def _macho_segment(self, data: bytes, offset: int, is_64: bool, limit: int) -> None:
+        header_size = 72 if is_64 else 56
+        if offset + header_size > limit:
+            return
         segname = data[offset + 8:offset + 24].rstrip(b"\x00").decode("ascii", "replace")
         if is_64:
             initprot = struct.unpack_from("<i", data, offset + 56)[0]
@@ -427,7 +484,7 @@ class ImageView:
         segment_exec = bool(initprot & 0x4)
         for i in range(min(nsects, 100)):
             base = sec_off + i * sec_size
-            if base + sec_size > len(data):
+            if base + sec_size > min(limit, len(data)):
                 break
             secname = data[base:base + 16].rstrip(b"\x00").decode("ascii", "replace")
             if is_64:
@@ -448,7 +505,9 @@ class ImageView:
                 executable=executable,
             ))
 
-    def _macho_symtab(self, data: bytes, offset: int) -> None:
+    def _macho_symtab(self, data: bytes, offset: int, limit: int) -> None:
+        if offset + 24 > limit:
+            return
         symoff, nsyms, stroff, strsize = struct.unpack_from("<IIII", data, offset + 8)
         ent = 16 if self.bits == 64 else 12
         for i in range(min(nsyms, 500_000)):
@@ -505,6 +564,13 @@ class ImageView:
         return None
 
     def find_function(self, name: str) -> ViewSymbol | None:
+        """Function symbol by name, or None when the image has no such symbol.
+
+        Matches the recorded name or one of its aliases first, then retries with
+        leading underscores stripped from both sides - Mach-O and MinGW prefix ``_`` to
+        C names, so the name a reader knows is not the name in the table. None means
+        the symbol is absent, not that the address is not a function.
+        """
         for sym in self._named:
             if sym.name == name or name in sym.aliases:
                 return sym
@@ -598,6 +664,13 @@ class ImageView:
         return self._data[start:start + avail]
 
     def file_offset(self, va: int) -> int | None:
+        """File offset holding the byte at ``va``, or None when there is none.
+
+        None has two legitimate meanings, and neither says the image is damaged: the
+        address is in no section at all (an inter-section hole), or it falls in the part
+        of a section with no file backing (BSS, or the tail where VirtualSize exceeds
+        SizeOfRawData).
+        """
         if self._pe is not None:
             return self._pe.rva_to_off(va - self.image_base)
         sec = self.section_at(va)
@@ -683,18 +756,8 @@ class ImageView:
 
 
 def _capstone_for(arch: str):
-    import capstone
-
-    table = {
-        "x86": (capstone.CS_ARCH_X86, capstone.CS_MODE_32),
-        "x64": (capstone.CS_ARCH_X86, capstone.CS_MODE_64),
-        "arm": (capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM),
-        "arm64": (capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM),
-    }
-    cs_arch, cs_mode = table.get(arch, (capstone.CS_ARCH_X86, capstone.CS_MODE_64))
-    md = capstone.Cs(cs_arch, cs_mode)
-    md.detail = True
-    return md
+    """capstone engine with operand detail on, which this module needs for rip/branch."""
+    return capstone_for(arch, detail=True)
 
 
 def _printable(raw: bytes) -> str:
@@ -1023,6 +1086,8 @@ def disasm_listing(
         # over several sections beats N calls whose caps and notes have to be merged
         # by hand.
         wanted = [name.strip() for name in section.split(",") if name.strip()]
+        if not wanted:
+            return _empty(view, error=f"no section name in {section!r}")
         for name in wanted:
             sec = view.find_section(name)
             if sec is None:
@@ -1045,6 +1110,11 @@ def disasm_listing(
             ranges = [(first.va, first.end_va)]
             scope = f"section {first.name} (no entry point in this image)"
     if not ranges:
+        # Every other branch either filled `ranges` or set `start`; this guard keeps a
+        # None start from reaching the arithmetic below, which is a TypeError rather
+        # than a message the caller can act on.
+        if start is None:
+            return _empty(view, error="pass --section, --function or --start")
         if end is None:
             # 16 bytes is the longest x86 instruction; ARM is fixed-width and shorter.
             end = start + count * 16
@@ -1158,13 +1228,16 @@ def _empty(view: ImageView, error: str | None = None) -> dict[str, Any]:
 def sections_view(binary_path: str | Path, view: ImageView | None = None) -> dict[str, Any]:
     """Section table with VA range, file offset, permissions and symbol count."""
     view = view or ImageView(binary_path)
+    # Taken once: symbols() copies the list, and a per-section call turns the symbol
+    # count into O(sections x symbols) copying on an image with 100k+ symbols.
+    symbols = view.symbols()
     rows = []
     for sec in view.sections:
         rows.append({
             "name": sec.name, "va": sec.va, "end_va": sec.end_va, "size": sec.size,
             "file_offset": sec.file_offset, "file_size": sec.file_size,
             "perms": sec.perms, "executable": sec.executable,
-            "symbols": sum(1 for s in view.symbols() if sec.contains(s.va)),
+            "symbols": sum(1 for s in symbols if sec.contains(s.va)),
         })
     return {"path": view.path, "format": view.format, "arch": view.arch,
             "bits": view.bits, "image_base": view.image_base,
@@ -1182,11 +1255,21 @@ def symbols_view(
     ``size`` is 0 when the symbol source did not record one (PE exports, Mach-O
     ``nlist``); that is reported as-is rather than filled in with the distance to the
     next symbol, which would look like a measurement.
+
+    Args:
+        pattern: case-insensitive substring; None lists everything.
+        limit: maximum rows returned. ``total`` still counts every match, so a caller
+            can tell "few symbols" from "many symbols, truncated".
+        view: reuse an existing ``ImageView`` instead of re-parsing the file.
+
+    Returns:
+        {path, format, arch, notes, total, shown, symbols}
     """
     view = view or ImageView(binary_path)
     needle = pattern.lower() if pattern else None
+    symbols = view.symbols()
     rows = []
-    for sym in view.symbols():
+    for sym in symbols:
         if needle and needle not in sym.name.lower():
             continue
         sec = view.section_at(sym.va)
@@ -1196,7 +1279,7 @@ def symbols_view(
         })
         if len(rows) >= limit:
             break
-    total = sum(1 for s in view.symbols()
+    total = sum(1 for s in symbols
                 if not needle or needle in s.name.lower())
     return {"path": view.path, "format": view.format, "arch": view.arch,
             "notes": list(view.notes), "total": total, "shown": len(rows),

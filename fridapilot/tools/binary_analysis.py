@@ -173,6 +173,28 @@ def analyze_elf(filepath: str | Path) -> ELFAnalysis:
     return result
 
 
+def capstone_for(arch: str, detail: bool = False):
+    """Configured capstone engine for an arch name (``x86``/``x64``/``arm``/``arm64``).
+
+    Shared with ``tools/disasm_view.py``: two copies of this table means a new
+    architecture gets added to one disassembler and silently decodes as x86-64 in the
+    other. ``detail`` is off by default because operand decoding roughly triples the
+    cost and only the reference-resolving callers need it.
+    """
+    import capstone
+
+    arch_map = {
+        "x86": (capstone.CS_ARCH_X86, capstone.CS_MODE_32),
+        "x64": (capstone.CS_ARCH_X86, capstone.CS_MODE_64),
+        "arm": (capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM),
+        "arm64": (capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM),
+    }
+    cs_arch, cs_mode = arch_map.get(arch, (capstone.CS_ARCH_X86, capstone.CS_MODE_64))
+    md = capstone.Cs(cs_arch, cs_mode)
+    md.detail = detail
+    return md
+
+
 def disassemble(
     binary_path: str | Path,
     address: int,
@@ -190,8 +212,6 @@ def disassemble(
     Returns:
         DisassemblyResult with decoded instructions.
     """
-    import capstone
-
     binary_path = Path(binary_path)
     data = binary_path.read_bytes()
 
@@ -219,15 +239,7 @@ def disassemble(
         else:
             arch = "x64"
 
-    arch_map = {
-        "x86": (capstone.CS_ARCH_X86, capstone.CS_MODE_32),
-        "x64": (capstone.CS_ARCH_X86, capstone.CS_MODE_64),
-        "arm": (capstone.CS_ARCH_ARM, capstone.CS_MODE_ARM),
-        "arm64": (capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM),
-    }
-    cs_arch, cs_mode = arch_map.get(arch, (capstone.CS_ARCH_X86, capstone.CS_MODE_64))
-    md = capstone.Cs(cs_arch, cs_mode)
-    md.detail = False
+    md = capstone_for(arch)
 
     # Read from offset
     chunk = data[address:address + count * 15]  # max 15 bytes per x86 instruction
@@ -246,7 +258,7 @@ def disassemble(
         start_address=address,
         instructions=instructions,
         architecture=arch,
-        mode=f"{cs_arch}/{cs_mode}",
+        mode=f"{md.arch}/{md.mode}",
     )
 
 
@@ -751,10 +763,12 @@ def analyze_go_binary(filepath: str | Path) -> GoAnalysis:
 # ── Mach-O Analysis ───────────────────────────────────────────
 
 # Mach-O magic numbers
-_MH_MAGIC_64 = 0xFEEDFACF
-_MH_MAGIC = 0xFEEDFACE
-_FAT_MAGIC = 0xCAFEBABE
-_FAT_MAGIC_64 = 0xCAFEBABF
+# Mach-O magics, shared with tools/disasm_view.py: one of these numbers being wrong in
+# a second copy means an image is silently read as the wrong format.
+MH_MAGIC_64 = 0xFEEDFACF
+MH_MAGIC = 0xFEEDFACE
+FAT_MAGIC = 0xCAFEBABE
+FAT_MAGIC_64 = 0xCAFEBABF
 
 _LC_NAMES = {
     0x1: "LC_SEGMENT", 0x19: "LC_SEGMENT_64",
@@ -824,7 +838,7 @@ def analyze_macho(filepath: str | Path) -> MachOAnalysis:
 
     # Fat binary detection
     magic_be = struct.unpack_from(">I", data, 0)[0]
-    if magic_be in (_FAT_MAGIC, _FAT_MAGIC_64):
+    if magic_be in (FAT_MAGIC, FAT_MAGIC_64):
         result.is_fat = True
         nfat = struct.unpack_from(">I", data, 4)[0]
         for i in range(min(nfat, 10)):
@@ -836,10 +850,10 @@ def analyze_macho(filepath: str | Path) -> MachOAnalysis:
             data = data[slice_off:]
             magic = struct.unpack_from("<I", data, 0)[0]
 
-    if magic == _MH_MAGIC_64:
+    if magic == MH_MAGIC_64:
         result.is_64bit = True
         hdr_size = 32
-    elif magic == _MH_MAGIC:
+    elif magic == MH_MAGIC:
         result.is_64bit = False
         hdr_size = 28
     else:
