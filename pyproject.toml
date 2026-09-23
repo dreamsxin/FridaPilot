@@ -42,8 +42,8 @@ dev = [
 ]
 
 [project.scripts]
-fp = "fridapilot.cli.main:app"
-frida-pilot = "fridapilot.cli.main:app"
+fp = "fridapilot.cli.main:run_cli"
+frida-pilot = "fridapilot.cli.main:run_cli"
 
 [tool.ruff]
 target-version = "py311"

@@ -239,6 +239,43 @@ If a signature changes, fix the docs in the same commit — the test will point 
   fetches public symbols, Rust panic strings carry the original source paths, kept COFF symbols
   name the functions. Reaching for the disassembler first wastes most of that.
 
+- **A tool that reports a size it did not examine is worse than one that refuses.**
+  `describe_function` decodes at most `budget` (8192) bytes and keeps 24 strings per bucket, yet
+  returns the function's full `size` — a 30 KB function comes back looking surveyed. `pe_rva.
+  function_strings` takes explicit ranges, defaults the budget to the whole range (capped at
+  `MAX_FUNCTION_SPAN`), and states `decoded_bytes` / `complete` per range, naming any range it cut
+  short. Every row carries `from_rva`, `target_rva` and the target's section, because a rip
+  displacement that lands beside an unrelated literal (a Dawn/Skia shader, a V8 error table) is
+  indistinguishable from a real hit by text alone — the address is what lets the reader discard
+  it. *(enforced: `tests/test_string_tools.py::test_a_budget_that_cuts_the_range_short_says_so`,
+  `::test_every_reported_string_really_lives_at_its_target_rva`)*
+- **A whole-file string scan cannot reach `.rdata` on a large image.**
+  `binary_analysis.find_strings` reads the file, then keeps the first `limit` rows by offset, so
+  on a 250 MB DLL the answer is header junk. `pe_rva.strings_in_range` takes a section or an RVA
+  range, which is also the only way a *table* becomes visible: adjacent literals — vendor
+  `base::Feature` names, a config key list, an endpoint set — are obvious in address order and
+  invisible in a whole-file dump (ntdll's entire `.rdata`: 4093 strings, 0.01 s, regex not a
+  Python byte walk). `terminated=False` marks a printable run with no NUL after it, i.e. bytes
+  inside a pointer table that only look like text.
+- **The RVA of a substring hit is not the address the code references.** `find_string_rvas`
+  matches substrings, so `rva` points into the middle of a string; what a LEA names is the
+  enclosing run's first byte, now returned as `string_rva`. Deriving it as
+  `rva - enclosing.index(needle)` is wrong the moment the needle occurs twice in the string,
+  which is routine when matching a keyword against a `__FILE__` path. *(enforced:
+  `tests/test_string_tools.py::test_a_substring_hit_reports_the_enclosing_string_s_own_rva`)*
+- **Long paths are a real failure mode, not a cosmetic one.** A Chromium DLL path is ~90
+  characters; repeated on every invocation it truncates shell lines, and the documented workaround
+  people actually reach for is a throwaway script with the path hardcoded — which takes the tool
+  layer out of the loop entirely. `fp target add <name> <path>` stores an alias used as `@name`.
+  It resolves in two places on purpose: `cli/main.expand_target_aliases` rewrites argv before
+  Click sees it (so it survives each command's own file-existence guard), and `PEImage` /
+  `ImageView` resolve it too (so SDK and MCP callers get it). Only a token that is exactly `@` plus
+  a *defined* alias is rewritten, so `--grep @dolphin` still works. **On PowerShell the alias must
+  be quoted** (`"@anty"`): `@x` is splatting syntax there, so a bare `@anty` is removed by the
+  shell before python runs and the command fails with "Missing argument" — measured on pwsh 7.6.
+  *(enforced: `tests/test_string_tools.py::test_argv_expansion_only_touches_defined_aliases`,
+  `::test_the_tool_layer_accepts_an_alias_wherever_it_takes_a_path`)*
+
 - **Frida sessions.** `fp dbg` commands act on the active session (`session switch`); state that
   is only written and never read is the bug to look for when a command "does nothing".
 - **Whether a section holds code is a per-format question, and Mach-O punishes the obvious

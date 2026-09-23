@@ -127,6 +127,9 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 
 
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
+| `fp binary func-strings <file> <ranges...>` | **给定函数区间，列出它引用的全部字符串**：每行带 from_rva / target_rva / 节区 / 编码 / 分类，并说明区间是否解码完整 | ❌ |
+| `fp binary strings-rva <file>` | 按 RVA 区间或节区 dump 字符串（`--section .rdata`、`--start/--end`），按地址排序，带 NUL 终止标记 | ❌ |
+| `fp target add <name> <path>` | 给长路径起别名，之后任何命令位置都能写 `@name`（另有 `list` / `remove`） | ❌ |
 | `fp disasm view <file>` | **带符号与节区信息的反汇编列表**：每行同时给出 VA / 原始字节 / 指令 / 所属节区 / 所属函数；PE/ELF/Mach-O 通用，`--section` `--function` `--start/--end` 过滤，`--format group\|table\|json\|csv`，`--source` 附带 DWARF 源文件:行号，`--mode recursive` 只反汇编控制流可达的字节，`--grep` 正则过滤指令 | ❌ |
 | `fp disasm sections <file>` | 节区表：VA 区间、文件偏移、读写执行权限、落在其中的符号数 | ❌ |
 | `fp disasm symbols <file>` | 函数符号表：地址、大小、所属节区、名字来源（symtab/dynsym/export/coff/nlist） | ❌ |
@@ -250,6 +253,43 @@ fp binary disasm-rva target.dll --rva 0x1000 -n 60 --symbols 0x1234abcd:parse_fi
 - xrefs 支持 rip-relative 数据引用扫描（定位"代码在哪里按 RVA 引用某字符串/全局"）
 
 典型工作流：`find-string-rva` 拿到字段名 RVA → `xrefs-rva` 找到解析该字段的代码 → `disasm-rva` 反汇编确认逻辑。Python SDK 亦可 `from fridapilot.tools.pe_rva import PEImage, disassemble_rva, xrefs_to_rva, find_string_rvas`。
+
+### 无符号镜像的字符串两问（`func-strings` / `strings-rva`）
+
+两个命令对应逆向时最常问的两句话，都以 RVA 为索引：
+
+```bash
+# 这个函数在引用哪些字符串？（多区间；0xA-0xB 显式区间，0xA 则从 .pdata 取边界）
+fp binary func-strings target.dll 0x3402740-0x3402933 0x3402b40 0x340fc40
+
+# 只看 __FILE__ 路径这一类
+fp binary func-strings target.dll 0x3402b40 --kind source_path
+
+# 这片 .rdata 邻域有什么？（发现名表用）
+fp binary strings-rva target.dll --start 0x10224cd0 --end 0x10224ef0
+fp binary strings-rva target.dll --section .rdata --contains SmartPaste
+```
+
+- `func-strings` 每行带 `from_rva`（引用指令）、`target_rva`、所属节区、编码、分类（`source_path` / `symbol` / `text` / `inline`）。**target_rva 和节区是筛噪声的唯一依据**：rip 位移落在 Dawn/Skia shader 源码或 V8 错误表旁边，只看文本和真命中完全一样
+- **不静默截断**。`describe_function` 最多解码 8192 字节、每类最多留 24 条，却照旧报告函数的完整 `size`，大函数看起来像已经查完了。这里 `--budget` 默认为整个区间，输出里 `complete` 说明是否端到端解码，没扫完会在 notes 里点名区间
+- `inline` 行的 `target_rva` 为 `None`——寄存器里拼出来的字符串没有 `.rdata` 副本，字符在操作码字节里
+- `strings-rva` 与 `fp binary find-strings` 的区别：后者扫全文件再按偏移取前 N 条，250 MB 镜像上只会返回文件头附近的东西，永远到不了 `.rdata`。按区间扫才能看出**表**——连续排布的厂商 Feature 名、配置键列表、端点集合，在地址序里一目了然，在全文件 dump 里不可见。ntdll 整个 `.rdata` 实测 4093 条 / 0.01s
+- `terminated=no` 表示这段可打印字节没有 NUL 结尾，大概率是指针表里碰巧像文本的数据，不是 C 字符串
+- `find_string_rvas` 现在还返回 `string_rva`：`enclosing` 首字节的 RVA，也就是代码真正 LEA 的地址。用 `rva - enclosing.index(keyword)` 反推是错的——关键词在路径里出现两次就偏了
+
+### 长路径别名（`fp target`）
+
+```bash
+fp target add anty "C:\Users\admin\AppData\Roaming\dolphin_anty\browser\1444-mini_installer\153.0.8010.37\chrome.dll"
+fp binary func-strings "@anty" 0x3402b40
+fp disasm view "@anty" --section .text
+fp target list
+```
+
+**PowerShell 必须加引号。** `@name` 在 PowerShell 里是 splatting 语法，裸写 `@anty` 会被 shell **直接吞掉**（参数消失，命令报 "Missing argument"，python 那边根本看不到这个 token）。写成 `"@anty"` 即可；cmd 与 bash 两种写法都行。
+
+别名在两处生效：argv 层（Click 解析前替换，所以能穿过每个命令自己的文件存在性检查）和工具层（`PEImage` / `ImageView`，所以 SDK 与 MCP 调用同样可用）。只有「整个 token 恰好是 `@` + 已定义别名」才会被替换，`--grep @dolphin` 不受影响；替换会在 stderr 打一行说明，不会默默生效。别名指向的路径在 `add` 时就解析成绝对路径并检查存在——否则换个工作目录再用就指向别处了。
+
 
 ### 带符号与节区信息的反汇编查看器（`fp disasm`）
 

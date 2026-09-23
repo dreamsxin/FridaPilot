@@ -40,6 +40,7 @@ from fridapilot.tools.binary_analysis import (
     MH_MAGIC_64,
     capstone_for,
 )
+from fridapilot.tools.targets import resolve_target
 
 # A listing is read by a human or pasted into a model context; both stop being served
 # by more than a few hundred lines. The byte cap is the real guard: a whole-.text
@@ -143,7 +144,7 @@ class ImageView:
     """
 
     def __init__(self, path: str | Path):
-        self.path = str(path)
+        self.path = str(resolve_target(path))
         self.format = ""
         self.arch = ""
         self.bits = 0

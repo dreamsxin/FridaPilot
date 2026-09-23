@@ -3,6 +3,8 @@
 Register all subcommands via Typer.
 """
 
+import sys
+
 import typer
 
 from fridapilot import __version__
@@ -45,6 +47,7 @@ from fridapilot.cli.ps import ps_cmd
 from fridapilot.cli.recon import recon_app
 from fridapilot.cli.report import report_cmd
 from fridapilot.cli.run import run_cmd
+from fridapilot.cli.target import target_app
 from fridapilot.cli.template import template_cmd
 from fridapilot.cli.unpack import unpack_app
 
@@ -68,7 +71,46 @@ app.add_typer(apk_app, name="apk", help="APK/DEX static analysis: manifest, comp
 
 app.command("dbg")(dbg_cmd)
 app.command("run")(run_cmd)
+app.add_typer(target_app, name="target",
+              help="Name long image paths once and use them as @alias.")
+
+
+def expand_target_aliases(argv: list[str]) -> list[str]:
+    """Replace every ``@alias`` token with the path it stands for.
+
+    Done on argv, before Click sees it, because the alias has to survive the
+    per-command file-existence guards as well as the tool call - and because the problem
+    it solves is a command *line* problem: one Chromium path is 90 characters, and the
+    workflow that drove this was abandoning the CLI for hardcoded scripts after shell
+    lines kept getting truncated.
+
+    Only a token that is exactly ``@`` plus a defined alias is rewritten. An unknown
+    alias is left alone so a genuine argument like ``--grep @dolphin`` keeps working, and
+    the substitution is announced on stderr so it is never silently wrong.
+    """
+    from fridapilot.tools.targets import list_targets
+
+    if not any(a.startswith("@") and len(a) > 1 for a in argv):
+        return argv
+    targets = list_targets()
+    if not targets:
+        return argv
+    out = []
+    for arg in argv:
+        name = arg[1:] if arg.startswith("@") else ""
+        if name in targets:
+            print(f"[fp] @{name} -> {targets[name]}", file=sys.stderr)
+            out.append(targets[name])
+        else:
+            out.append(arg)
+    return out
+
+
+def run_cli() -> None:
+    """Console-script entry point: expand @aliases, then run the app."""
+    sys.argv[1:] = expand_target_aliases(sys.argv[1:])
+    app()
 
 
 if __name__ == "__main__":
-    app()
+    run_cli()
