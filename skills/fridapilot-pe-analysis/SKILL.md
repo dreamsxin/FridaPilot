@@ -115,10 +115,11 @@ results = find_string_rvas("chrome.dll", ["enableTelemetry", "deviceModelName"])
 results = find_string_rvas("chrome.dll", ["宽字符"], encoding="utf16le")
 ```
 
-<!-- return-keys: find_string_rvas = needle, offset, rva, encoding, section, whole, enclosing -->
-Rows: `needle`, `offset` (file offset), `rva`, `encoding`, `section`, `whole`, `enclosing`. A
-needle that is absent still gets a row, with `offset` and `rva` set to `None`. Every occurrence
-is reported, so a string that appears twice yields two rows.
+<!-- return-keys: find_string_rvas = needle, offset, rva, string_rva, encoding, section, whole, enclosing -->
+Rows: `needle`, `offset` (file offset), `rva` (of the hit), `string_rva` (of `enclosing`'s first
+byte — the address the code LEAs, and the one to pass to `map_refs_to_functions`), `encoding`,
+`section`, `whole`, `enclosing`. A needle that is absent still gets a row, with `offset` and `rva`
+set to `None`. Every occurrence is reported, so a string that appears twice yields two rows.
 
 **Every hit is a substring match — check `whole` before believing it.** `enclosing` is the
 NUL-delimited run the hit sits inside (`None` when it is not in a C string at all, e.g. a

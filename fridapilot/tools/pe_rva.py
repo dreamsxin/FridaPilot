@@ -22,6 +22,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from fridapilot.tools.targets import resolve_target
+
 logger = logging.getLogger(__name__)
 
 def _pe_cache_key(path) -> tuple[str, int, int] | None:
@@ -63,6 +65,7 @@ class PEImage:
     """
 
     def __new__(cls, path):
+        path = resolve_target(path)
         key = _pe_cache_key(path)
         if key is not None:
             cached = _PE_CACHE.get(key)
@@ -73,6 +76,9 @@ class PEImage:
     def __init__(self, path: str | Path):
         import pefile
 
+        # An "@name" alias becomes its stored path here rather than in the CLI alone, so
+        # SDK and MCP callers get it too. A plain path is returned unchanged.
+        path = resolve_target(path)
         key = _pe_cache_key(path)
         if key is not None and _PE_CACHE.get(key) is self:
             return  # served from the cache: already fully initialized
@@ -247,7 +253,7 @@ def _find_all(data: bytes, pattern: bytes, start: int = 0):
 
 
 def _enclosing_cstring(data: bytes, idx: int, pat_len: int, wide: bool,
-                       window: int = 512) -> tuple[bytes | None, bool]:
+                       window: int = 512) -> tuple[bytes | None, bool, int]:
     """The NUL-terminated string containing a hit, and whether the hit IS that string.
 
     A substring search answers "these bytes appear here", never "a string equal to the
@@ -257,12 +263,15 @@ def _enclosing_cstring(data: bytes, idx: int, pat_len: int, wide: bool,
     ``FeatureSupport\\0``, so it passes that test — the tail is constrained, the start
     is not. Only the byte before the hit can settle it, so this walks both ways.
 
-    Returns (raw_bytes, whole). ``None`` means no terminator within ``window`` on one
-    side, i.e. the hit is probably not in a C string at all (code, a length-prefixed
-    blob, binary data) — reported as unknown rather than guessed. What is returned is
-    the NUL-delimited run around the hit, so when the neighbouring bytes are pointers
-    rather than text the run legitimately carries that noise with it; only ``whole``
-    is a verdict.
+    Returns (raw_bytes, whole, start_offset). ``None``/-1 means no terminator within
+    ``window`` on one side, i.e. the hit is probably not in a C string at all (code, a
+    length-prefixed blob, binary data) — reported as unknown rather than guessed. What
+    is returned is the NUL-delimited run around the hit, so when the neighbouring bytes
+    are pointers rather than text the run legitimately carries that noise with it; only
+    ``whole`` is a verdict. ``start_offset`` is the file offset of the run's first byte,
+    which is the address code actually references — the hit offset is not, and
+    recovering it by subtracting where the needle appears in the run is wrong as soon as
+    the needle occurs twice.
     """
     step = 2 if wide else 1
     unit_zero = b"\0" * step
@@ -273,7 +282,7 @@ def _enclosing_cstring(data: bytes, idx: int, pat_len: int, wide: bool,
             break
         start -= step
     else:
-        return None, False
+        return None, False, -1
     hi = min(idx + pat_len + window, len(data))
     end = idx + pat_len
     while end + step <= hi:
@@ -281,8 +290,8 @@ def _enclosing_cstring(data: bytes, idx: int, pat_len: int, wide: bool,
             break
         end += step
     else:
-        return None, False
-    return data[start:end], start == idx and end == idx + pat_len
+        return None, False, -1
+    return data[start:end], start == idx and end == idx + pat_len, start
 
 
 def find_string_rvas(
@@ -297,7 +306,7 @@ def find_string_rvas(
         encoding: "ascii" or "utf16le".
 
     Returns:
-        List of {needle, offset, rva, encoding, section, whole, enclosing};
+        List of {needle, offset, rva, string_rva, encoding, section, whole, enclosing};
         offset/rva are None if absent.
 
         ``whole`` and ``enclosing`` exist because every hit is a *substring* match.
@@ -307,6 +316,13 @@ def find_string_rvas(
         identifier exists in the image, without checking them: 18 hits for
         ``FeatureSupport`` in one Chromium DLL were 17 D3D12 log messages plus
         ``queryFeatureSupport``, and none of them was the key being looked for.
+
+        ``string_rva`` is the RVA of ``enclosing``'s first byte — the address the code
+        actually LEAs, and therefore the one to hand to ``map_refs_to_functions`` or
+        ``xrefs_to_rva``. ``rva`` points at the *hit*, which is only the same address
+        when the needle starts the string; deriving it as
+        ``rva - enclosing.index(needle)`` is wrong the moment the needle occurs twice in
+        the string, which is routine for a keyword matched against a source path.
     """
     img = PEImage(binary_path)
     data = img._data
@@ -323,11 +339,12 @@ def find_string_rvas(
             if idx < 0:
                 break
             rva = img.off_to_rva(idx)
-            raw, whole = _enclosing_cstring(data, idx, len(pat), encoding != "ascii")
+            raw, whole, str_off = _enclosing_cstring(data, idx, len(pat), encoding != "ascii")
             codec = "utf-8" if encoding == "ascii" else "utf-16-le"
             out.append({
                 "needle": needle, "offset": idx,
                 "rva": rva, "encoding": codec,
+                "string_rva": img.off_to_rva(str_off) if str_off >= 0 else None,
                 "section": img.section_of(rva) if rva is not None else "",
                 "whole": whole,
                 "enclosing": raw.decode(codec, "replace") if raw is not None else None,
@@ -336,6 +353,7 @@ def find_string_rvas(
             start = idx + 1
         if found == 0:
             out.append({"needle": needle, "offset": None, "rva": None, "encoding": codec,
+                        "string_rva": None,
                         "section": "", "whole": False, "enclosing": None})
     return out
 
@@ -531,12 +549,8 @@ def _function_strings(img: PEImage, md: Any, begin: int, end: int,
             if not found:
                 continue
             text = found[0]
-            if any(s in text for s in _SOURCE_SUFFIXES) and ("/" in text or "\\" in text):
-                bucket = paths
-            elif "::" in text:
-                bucket = symbols
-            else:
-                bucket = other
+            bucket = {"source_path": paths, "symbol": symbols}.get(
+                _classify_text(text), other)
             if text not in bucket and len(bucket) < limit:
                 bucket.append(text)
         imm = _immediate_text(insn, cx86)
@@ -585,6 +599,220 @@ def describe_function(
         "has_bounds": found is not None,
         "source_paths": paths, "symbols": symbols, "strings": other,
         "label": label or "(no readable strings)",
+    }
+
+
+MAX_FUNCTION_SPAN = 1 << 20
+MAX_REGION_SPAN = 64 << 20
+
+
+def _classify_text(text: str) -> str:
+    """Which kind of literal this is: a __FILE__ path, a symbol, or plain text."""
+    if any(s in text for s in _SOURCE_SUFFIXES) and ("/" in text or "\\" in text):
+        return "source_path"
+    if "::" in text:
+        return "symbol"
+    return "text"
+
+
+def function_strings(
+    binary_path: str | Path,
+    ranges: list[tuple[int, int | None]],
+    budget: int = 0,
+    min_len: int = 4,
+    limit: int = 0,
+    cap: int = 200,
+) -> dict[str, Any]:
+    """Every string each given code range references, with the RVA on both ends.
+
+    The fastest way to identify a function in a stripped image: ``DCHECK`` /
+    ``NOTREACHED`` expand to ``__FILE__``, log calls carry their own message, endpoint
+    URLs and ``base::Feature`` names are literals. A 2836-byte function usually names
+    itself without a single line of disassembly being read.
+
+    This is the addressed form of what ``describe_function`` summarises. Two differences
+    matter in practice:
+
+    * every row carries ``from_rva`` (the referencing instruction) and ``target_rva``
+      plus its ``section``. A reference into ``.rdata`` next to a Dawn/Skia shader or a
+      V8 error table is indistinguishable from a real hit by text alone, and the target
+      address is what lets the reader throw it out;
+    * nothing is silently dropped. ``describe_function`` decodes at most ``budget``
+      bytes and keeps at most 24 strings per bucket while still reporting the function's
+      full ``size``, so a large function comes back looking complete. Here ``budget``
+      defaults to the whole range and ``complete`` says whether the range was decoded
+      end to end.
+
+    Args:
+        ranges: [(begin_rva, end_rva)]. ``end_rva=None`` means "resolve the bounds from
+            ``.pdata``", falling back to ``begin + 8192`` for a leaf with no
+            RUNTIME_FUNCTION (reported as ``has_bounds=False``).
+        budget: max bytes to decode per range; 0 means the whole range, capped at
+            ``MAX_FUNCTION_SPAN``.
+        min_len: shortest run accepted as text at a target.
+        limit: max rows per range; 0 means unlimited.
+        cap: longest string returned.
+
+    Returns:
+        {path, ranges: [{begin_rva, end_rva, size, has_bounds, decoded_bytes, complete,
+        truncated, count, strings: [{from_rva, target_rva, section, encoding, kind,
+        text}]}], total, notes}
+    """
+    import capstone
+    from capstone import x86 as cx86
+
+    img = PEImage(binary_path)
+    md = capstone.Cs(capstone.CS_ARCH_X86,
+                     capstone.CS_MODE_64 if img.is_64bit else capstone.CS_MODE_32)
+    md.detail = True
+
+    notes: list[str] = []
+    out_ranges: list[dict[str, Any]] = []
+    total = 0
+    for begin, end in ranges:
+        has_bounds = True
+        if end is None:
+            found = img.function_at(begin)
+            if found is not None:
+                begin, end = found[0], found[1]
+            else:
+                has_bounds = False
+                end = begin + 8192
+        span = max(end - begin, 0)
+        allowed = min(span, budget or MAX_FUNCTION_SPAN)
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[int, int | None]] = set()
+        truncated = False
+        for insn in _decode_body(img, md, begin, begin + allowed, allowed):
+            hits: list[tuple[int | None, str, str]] = []
+            for op in insn.operands:
+                if op.type != cx86.X86_OP_MEM or op.mem.base != cx86.X86_REG_RIP:
+                    continue
+                tgt = insn.address + insn.size + op.mem.disp - img.image_base
+                found_text = _text_at(img, tgt, min_len=min_len, cap=cap)
+                if found_text:
+                    hits.append((tgt, found_text[0], found_text[1]))
+            imm = _immediate_text(insn, cx86)
+            if imm:
+                # An inline-constructed string has no .rdata copy at all, so there is no
+                # target address to report - the characters are in the opcode bytes.
+                hits.append((None, imm, "inline"))
+            from_rva = insn.address - img.image_base
+            for target_rva, text, enc in hits:
+                key = (from_rva, target_rva)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if limit and len(rows) >= limit:
+                    truncated = True
+                    break
+                rows.append({
+                    "from_rva": from_rva,
+                    "target_rva": target_rva,
+                    "section": img.section_of(target_rva) if target_rva is not None else "",
+                    "encoding": enc,
+                    "kind": "inline" if enc == "inline" else _classify_text(text),
+                    "text": text,
+                })
+            if truncated:
+                break
+        out_ranges.append({
+            "begin_rva": begin, "end_rva": end, "size": span,
+            "has_bounds": has_bounds,
+            "decoded_bytes": allowed, "complete": allowed >= span and not truncated,
+            "truncated": truncated, "count": len(rows), "strings": rows,
+        })
+        total += len(rows)
+        if allowed < span:
+            notes.append(
+                f"0x{begin:x}: decoded {allowed} of {span} bytes - raise budget "
+                f"(cap {MAX_FUNCTION_SPAN}) or the tail is unexamined")
+    if not notes:
+        notes.append("every range decoded end to end")
+    return {"path": str(binary_path), "ranges": out_ranges, "total": total, "notes": notes}
+
+
+def strings_in_range(
+    binary_path: str | Path,
+    start_rva: int | None = None,
+    end_rva: int | None = None,
+    section: str = "",
+    min_len: int = 4,
+    encoding: str = "ascii",
+    limit: int = 0,
+) -> dict[str, Any]:
+    """Strings inside one RVA range or section, keyed by RVA.
+
+    ``binary_analysis.find_strings`` scans the whole file and then keeps the first N by
+    offset, which on a 250 MB image returns headers and never reaches ``.rdata``.
+    Aiming at a range is what finds a *table*: a run of adjacent literals - vendor
+    ``base::Feature`` names, a config key list, an endpoint set - is obvious when the
+    neighbourhood is printed in address order and invisible in a whole-file dump.
+
+    ``terminated`` distinguishes a real C string from a printable fragment of binary
+    data: an unterminated run inside a pointer table is text by accident.
+
+    Args:
+        section: section name; overrides start/end when given.
+        start_rva/end_rva: explicit range (RVAs, not file offsets).
+        encoding: ``ascii``, ``utf16le`` or ``all``.
+        limit: max rows; 0 means unlimited.
+
+    Returns:
+        {path, section, start_rva, end_rva, scanned_bytes, complete, count, truncated,
+        strings: [{rva, offset, encoding, length, terminated, text}]}
+    """
+    img = PEImage(binary_path)
+    if section:
+        found = img.section_range(section)
+        if found is None:
+            names = ", ".join(name for name, _s, _e in
+                              img.code_sections() + img.data_sections())
+            raise ValueError(f"no section named {section!r} (have: {names})")
+        start_rva, end_rva = found
+    if start_rva is None or end_rva is None or end_rva <= start_rva:
+        raise ValueError("pass a section name, or start_rva and end_rva with end > start")
+
+    span = end_rva - start_rva
+    scanned = min(span, MAX_REGION_SPAN)
+    data = img.read_rva(start_rva, scanned) or b""
+    rows: list[dict[str, Any]] = []
+    truncated = False
+    # Regex, not a per-byte Python loop: the same reason the absolute-pattern kinds go
+    # through bytes.find. A 32 MB .rdata is 0.1 s here and ~10 s walked in Python.
+    patterns = []
+    if encoding in ("ascii", "all"):
+        patterns.append(("ascii", re.compile(rb"[\x20-\x7e]{%d,}" % min_len)))
+    if encoding in ("utf16le", "all"):
+        patterns.append(("utf16le", re.compile(rb"(?:[\x20-\x7e]\x00){%d,}" % min_len)))
+    if not patterns:
+        raise ValueError(f"unknown encoding {encoding!r} (ascii, utf16le, all)")
+
+    for enc, pattern in patterns:
+        for m in pattern.finditer(data):
+            if limit and len(rows) >= limit:
+                truncated = True
+                break
+            raw = m.group()
+            tail = data[m.end():m.end() + (2 if enc == "utf16le" else 1)]
+            rva = start_rva + m.start()
+            rows.append({
+                "rva": rva,
+                "offset": img.rva_to_off(rva),
+                "encoding": enc,
+                "length": len(raw) // 2 if enc == "utf16le" else len(raw),
+                "terminated": tail.startswith(b"\0"),
+                "text": (raw.decode("utf-16-le") if enc == "utf16le"
+                         else raw.decode("ascii")),
+            })
+        if truncated:
+            break
+    rows.sort(key=lambda r: r["rva"])
+    return {
+        "path": str(binary_path), "section": section,
+        "start_rva": start_rva, "end_rva": end_rva,
+        "scanned_bytes": len(data), "complete": len(data) >= span and not truncated,
+        "count": len(rows), "truncated": truncated, "strings": rows,
     }
 
 

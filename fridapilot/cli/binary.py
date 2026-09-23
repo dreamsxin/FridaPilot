@@ -1504,3 +1504,142 @@ def metadata_cmd(
     console.print(table)
 
 
+def _parse_range(spec: str) -> tuple[int, int | None]:
+    """"0xA-0xB" -> (A, B); "0xA" -> (A, None) meaning "resolve bounds from .pdata"."""
+    if "-" in spec:
+        lo, _, hi = spec.partition("-")
+        return int(lo, 16), int(hi, 16)
+    return int(spec, 16), None
+
+
+@binary_app.command("func-strings")
+def func_strings_cmd(
+    binary: str = typer.Argument(..., help="Path to a PE file."),
+    ranges: list[str] = typer.Argument(
+        ..., help="Function ranges: 0xBEGIN-0xEND, or 0xRVA to take bounds from .pdata."),
+    budget: int = typer.Option(0, "--budget", "-b",
+                               help="Max bytes decoded per range; 0 = the whole range."),
+    min_len: int = typer.Option(4, "--min-len", "-m", help="Shortest run accepted as text."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Max rows per range; 0 = unlimited."),
+    kind: str = typer.Option("", "--kind", "-k",
+                             help="Keep only source_path, symbol, text or inline."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Every string the given functions reference, with both RVAs and the section.
+
+    The quickest identification pass on a stripped image: __FILE__ paths from DCHECK, log
+    messages, endpoint URLs and base::Feature names are all literals, so a 2800-byte
+    function usually names itself without any disassembly being read.
+
+    Unlike `fp binary describe`, nothing is summarised away: each row carries the
+    referencing instruction, the target address and its section (the only way to discard a
+    coincidental hit on a neighbouring Dawn/Skia or V8 literal), and the output states
+    whether each range was decoded end to end.
+    """
+    from fridapilot.tools.pe_rva import function_strings
+
+    if not Path(binary).is_file():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+    try:
+        parsed = [_parse_range(spec) for spec in ranges]
+    except ValueError as exc:
+        console.print(f"[red]Bad range: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    result = function_strings(binary, parsed, budget=budget, min_len=min_len, limit=limit)
+    if kind:
+        for entry in result["ranges"]:
+            entry["strings"] = [r for r in entry["strings"] if r["kind"] == kind]
+            entry["count"] = len(entry["strings"])
+        result["total"] = sum(e["count"] for e in result["ranges"])
+
+    if json_output:
+        _emit_json(result)
+        return
+
+    for note in result["notes"]:
+        console.print(f"[dim]note: {_console_safe(note, 300)}[/dim]")
+    for entry in result["ranges"]:
+        mark = "" if entry["has_bounds"] else " [yellow](no .pdata bounds)[/yellow]"
+        done = "" if entry["complete"] else " [yellow](partial)[/yellow]"
+        console.print(f"\n[bold]0x{entry['begin_rva']:x}-0x{entry['end_rva']:x}[/bold] "
+                      f"{entry['size']}B  {entry['count']} strings{mark}{done}")
+        table = Table(header_style="bold")
+        table.add_column("From", style="dim", no_wrap=True)
+        table.add_column("Target", style="dim", no_wrap=True)
+        table.add_column("Section", no_wrap=True)
+        table.add_column("Kind", no_wrap=True)
+        table.add_column("Text", overflow="fold")
+        for row in entry["strings"]:
+            table.add_row(
+                f"0x{row['from_rva']:x}",
+                f"0x{row['target_rva']:x}" if row["target_rva"] is not None else "-",
+                row["section"] or "-", row["kind"],
+                _console_safe(row["text"], 200))
+        console.print(table)
+    console.print(f"\n[bold]{result['total']}[/bold] strings over "
+                  f"{len(result['ranges'])} ranges")
+
+
+@binary_app.command("strings-rva")
+def strings_rva_cmd(
+    binary: str = typer.Argument(..., help="Path to a PE file."),
+    section: str = typer.Option("", "--section", "-s",
+                                help="Section to scan (.rdata, .data); overrides --start/--end."),
+    start: str = typer.Option("", "--start", help="Start RVA (hex), e.g. 0x10224cd0."),
+    end: str = typer.Option("", "--end", help="End RVA (exclusive)."),
+    min_len: int = typer.Option(4, "--min-len", "-m", help="Shortest run reported."),
+    encoding: str = typer.Option("ascii", "--encoding", "-e", help="ascii, utf16le or all."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Max rows; 0 = unlimited."),
+    contains: str = typer.Option("", "--contains", "-c", help="Keep rows containing this."),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
+) -> None:
+    """Strings inside one RVA range or section, in address order.
+
+    `fp binary find-strings` scans the whole file and keeps the first N by offset, which on
+    a 250 MB image returns header junk and never reaches .rdata. Aiming at a range is what
+    exposes a *table*: a run of adjacent literals - vendor base::Feature names, a config
+    key list, an endpoint set - is obvious in address order and invisible in a whole-file
+    dump.
+    """
+    from fridapilot.tools.pe_rva import strings_in_range
+
+    if not Path(binary).is_file():
+        console.print(f"[red]File not found: {binary}[/red]")
+        raise typer.Exit(1)
+    try:
+        result = strings_in_range(
+            binary, section=section,
+            start_rva=int(start, 16) if start else None,
+            end_rva=int(end, 16) if end else None,
+            min_len=min_len, encoding=encoding, limit=limit)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    rows = result["strings"]
+    if contains:
+        rows = [r for r in rows if contains.lower() in r["text"].lower()]
+
+    if json_output:
+        _emit_json({**result, "strings": rows, "count": len(rows)})
+        return
+
+    scope = result["section"] or f"0x{result['start_rva']:x}-0x{result['end_rva']:x}"
+    done = "" if result["complete"] else " [yellow](truncated)[/yellow]"
+    console.print(f"[bold]{scope}[/bold]  {result['scanned_bytes']} bytes scanned  "
+                  f"{len(rows)} strings{done}")
+    table = Table(header_style="bold")
+    table.add_column("RVA", style="dim", no_wrap=True)
+    table.add_column("Len", justify="right", no_wrap=True)
+    table.add_column("Enc", no_wrap=True)
+    table.add_column("NUL", no_wrap=True)
+    table.add_column("Text", overflow="fold")
+    for row in rows:
+        table.add_row(f"0x{row['rva']:x}", str(row["length"]), row["encoding"],
+                      "yes" if row["terminated"] else "[yellow]no[/yellow]",
+                      _console_safe(row["text"], 200))
+    console.print(table)
+
+
