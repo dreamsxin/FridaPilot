@@ -158,7 +158,79 @@ def test_call_target_is_resolved_to_the_callee_name(elf_image):
     assert "helper" in calls[0]["target"]
 
 
+# ── source lines (DWARF) ─────────────────────────────────────
+
+
+def test_dwarf_rows_are_what_the_fixture_encoded(elf_image):
+    """pyelftools first as the oracle on the fixture, then the view against it."""
+    from elftools.elf.elffile import ELFFile
+
+    with open(elf_image, "rb") as f:
+        dwarf = ELFFile(f).get_dwarf_info()
+        seen = []
+        for cu in dwarf.iter_CUs():
+            prog = dwarf.line_program_for_CU(cu)
+            files = prog.header["file_entry"]
+            for entry in prog.get_entries():
+                state = entry.state
+                if state is None or state.end_sequence:
+                    continue
+                name = files[state.file - 1].name.decode()
+                seen.append((state.address, name, state.line))
+    assert seen == se.DWARF_ROWS, "the fixture's line program is not what it claims"
+
+    view = ImageView(elf_image)
+    assert view.has_debug_lines is True
+    for address, name, line in se.DWARF_ROWS:
+        assert view.source_at(address) == (name, line)
+
+    result = disasm_listing(elf_image, function="main", source=True, view=view)
+    for ln in result["lines"]:
+        assert ln["source_file"] == se.DWARF_FILE
+        assert ln["source_line"] in (10, 11)
+
+
+def test_line_info_stops_where_the_sequence_ends(elf_image):
+    """Past DW_LNE_end_sequence there is no line information, and none is invented.
+
+    A DWARF line program is a set of sequences; the rows of one say nothing about
+    addresses beyond its end. The obvious lookup - bisect for the last row at or below
+    the address - hands every later address the final row's file and line, so `helper`
+    and the unowned code at GAP_VA would be reported as living in the last line of
+    `main`.
+    """
+    view = ImageView(elf_image)
+    assert view.source_at(se.DWARF_END - 1) is not None
+    assert view.source_at(se.DWARF_END) is None
+    assert view.source_at(se.HELPER_VA) is None
+    assert view.source_at(se.GAP_VA) is None
+
+    result = disasm_listing(elf_image, function="helper", source=True, view=view)
+    assert result["lines"]
+    assert all(ln["source_file"] is None and ln["source_line"] is None
+               for ln in result["lines"])
+
+
+def test_source_lookup_is_opt_in(elf_image):
+    """The keys exist either way; resolving them costs a DWARF parse, so it is asked for."""
+    off = disasm_listing(elf_image, function="main")
+    assert all(ln["source_file"] is None for ln in off["lines"])
+    on = disasm_listing(elf_image, function="main", source=True)
+    assert any(ln["source_file"] for ln in on["lines"])
+
+
+def test_pe_has_no_in_image_line_table(pe_image):
+    """Windows line numbers live in the PDB, so the image alone cannot answer."""
+    path, _placed, _end = pe_image
+    view = ImageView(path)
+    assert view.has_debug_lines is False
+    assert view.source_at(view.entry_va) is None
+    result = disasm_listing(path, section=".text", count=3, source=True, view=view)
+    assert all(ln["source_file"] is None for ln in result["lines"])
+
+
 # ── the failures this module exists to avoid ─────────────────
+
 
 
 def test_data_in_code_does_not_truncate_the_listing(pe_image):
@@ -292,7 +364,7 @@ def test_pe_lines_carry_both_the_rva_and_the_file_offset(pe_image):
 # ── CLI wiring ───────────────────────────────────────────────
 
 
-def test_cli_commands_are_registered_and_run(pe_image):
+def test_cli_commands_are_registered_and_run(pe_image, elf_image):
     """`fp disasm` must be reachable from the root app, not just importable."""
     import json
 
@@ -304,6 +376,8 @@ def test_cli_commands_are_registered_and_run(pe_image):
     runner = CliRunner()
     for args in (["disasm", "view", path, "--section", ".text", "--count", "5"],
                  ["disasm", "view", path, "--format", "table", "--count", "5"],
+                 ["disasm", "view", elf_image, "--function", "main", "--source"],
+                 ["disasm", "view", elf_image, "--source", "--format", "table"],
                  ["disasm", "sections", path],
                  ["disasm", "symbols", path]):
         result = runner.invoke(app, args)
@@ -314,6 +388,11 @@ def test_cli_commands_are_registered_and_run(pe_image):
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert len(payload["lines"]) == 3
+
+    sourced = runner.invoke(app, ["disasm", "view", elf_image, "--function", "main",
+                                  "--source", "--format", "json"])
+    assert sourced.exit_code == 0
+    assert json.loads(sourced.stdout)["lines"][0]["source_file"] == se.DWARF_FILE
 
     missing = runner.invoke(app, ["disasm", "sections", "no-such-file.exe"])
     assert missing.exit_code == 1

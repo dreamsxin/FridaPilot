@@ -100,6 +100,24 @@ def _perm_string(read: bool, write: bool, execute: bool) -> str:
     return ("r" if read else "-") + ("w" if write else "-") + ("x" if execute else "-")
 
 
+def _dwarf_path(files, dirs, index: int) -> str:
+    """File name for a DWARF line-program file index, with its directory if any."""
+    if index < 0 or index >= len(files):
+        return f"<file {index}>"
+    entry = files[index]
+    name = entry.name.decode("utf-8", "replace") if isinstance(entry.name, bytes) \
+        else str(entry.name)
+    dir_index = getattr(entry, "dir_index", 0) or 0
+    if dir_index and dir_index < len(dirs):
+        raw = dirs[dir_index]
+        # DWARF 5 directory entries are Containers, earlier ones plain byte strings.
+        folder = getattr(raw, "name", raw)
+        if isinstance(folder, bytes):
+            folder = folder.decode("utf-8", "replace")
+        return f"{folder}/{name}"
+    return name
+
+
 class ImageView:
     """Address-indexed view of an executable: sections, function symbols, bytes.
 
@@ -126,6 +144,10 @@ class ImageView:
         self._named: list[ViewSymbol] = []
         self._pe = None                      # PEImage, for the PE path only
         self._data = b""                     # raw file bytes, for ELF / Mach-O
+        self.has_debug_lines = False         # a line table exists and can be read
+        # [(start_va, end_va, file, line)], built on first use: parsing DWARF costs
+        # far more than everything else here, and most listings never ask for it.
+        self._line_rows: list[tuple[int, int, str, int]] | None = None
 
         with open(self.path, "rb") as f:
             head = f.read(8)
@@ -188,6 +210,13 @@ class ImageView:
 
         self._pe_exports(pe)
         self._pe_coff_symbols(pe, img)
+        # Line numbers on Windows live in the PDB, not in the image: even a build with
+        # full debug info has nothing address-to-line inside the .exe. Saying so beats
+        # a bare "no source information".
+        pdb = self._pe_pdb_path(pe)
+        if pdb:
+            self.notes.append(
+                f"source lines are in the PDB ({pdb}), which is not read here")
         if img.exception_table():
             # Named symbols are sparse in a PE; .pdata covers every non-leaf function
             # exactly, which is why attribution() consults it before the name index.
@@ -198,6 +227,23 @@ class ImageView:
             self.notes.append(
                 "no exports, no COFF symbols and no .pdata: function attribution is "
                 "unavailable for this image")
+
+    def _pe_pdb_path(self, pe) -> str:
+        """PDB path from the CodeView debug directory, or "" when absent."""
+        import pefile
+
+        if not hasattr(pe, "DIRECTORY_ENTRY_DEBUG"):
+            try:
+                pe.parse_data_directories(
+                    directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_DEBUG"]])
+            except Exception:
+                return ""
+        for dbg in getattr(pe, "DIRECTORY_ENTRY_DEBUG", []):
+            entry = getattr(dbg, "entry", None)
+            raw = getattr(entry, "PdbFileName", b"") if entry is not None else b""
+            if raw:
+                return raw.rstrip(b"\x00").decode("utf-8", "replace")
+        return ""
 
     def _pe_exports(self, pe) -> None:
         """Export-table names. The one symbol source a stripped release DLL keeps."""
@@ -313,6 +359,12 @@ class ImageView:
                         self._named.append(ViewSymbol(
                             name=sym.name, va=sym["st_value"],
                             size=sym["st_size"], source=source))
+            self.has_debug_lines = bool(elf.has_dwarf_info()
+                                        and elf.get_section_by_name(".debug_line"))
+        if self.has_debug_lines:
+            self.notes.append(
+                "has DWARF line info: pass source=True (--source) for file:line per "
+                "line; parsing it is the expensive part, so it is off by default")
         if not self._named:
             self.notes.append("stripped: no STT_FUNC symbols in .symtab or .dynsym")
 
@@ -552,6 +604,79 @@ class ImageView:
             return None
         return sec.file_offset + (va - sec.va)
 
+    # ── source lines (DWARF) ─────────────────────────────────
+
+    def source_at(self, va: int) -> tuple[str, int] | None:
+        """(source file, line) for a VA, or None when nothing covers it.
+
+        Coverage is by *range*, not by nearest preceding row. A DWARF line program is
+        a set of sequences, each closed by ``DW_LNE_end_sequence``, and the rows of one
+        sequence say nothing about addresses past its end. Bisecting for "the last row
+        at or below this address" - the obvious implementation - therefore hands every
+        address after the final row that row's file and line, including code in other
+        functions and other sections.
+        """
+        rows = self._line_table()
+        if not rows:
+            return None
+        idx = bisect.bisect_right([r[0] for r in rows], va) - 1
+        if idx < 0:
+            return None
+        start, end, path, line = rows[idx]
+        return (path, line) if start <= va < end else None
+
+    def _line_table(self) -> list[tuple[int, int, str, int]]:
+        if self._line_rows is None:
+            try:
+                self._line_rows = self._elf_line_table() if self.format == "elf" else []
+            except Exception:
+                # Malformed or unsupported debug info must not take the listing down:
+                # the addresses, sections and symbols are all still valid without it.
+                self._line_rows = []
+                self.notes.append("debug line info present but could not be parsed")
+        return self._line_rows
+
+    def _elf_line_table(self) -> list[tuple[int, int, str, int]]:
+        """DWARF line rows as [(start_va, end_va, file, line)], non-overlapping."""
+        import io
+
+        from elftools.elf.elffile import ELFFile
+
+        if not self.has_debug_lines:
+            return []
+        rows: list[tuple[int, int, str, int]] = []
+        with io.BytesIO(self._data) as f:
+            dwarf = ELFFile(f).get_dwarf_info()
+            for cu in dwarf.iter_CUs():
+                prog = dwarf.line_program_for_CU(cu)
+                if prog is None:
+                    continue
+                header = prog.header
+                # DWARF 5 numbers file entries from 0 and puts the primary source file
+                # at index 0; DWARF 2-4 number them from 1. Using one rule for both
+                # shifts every file name by one.
+                base = 0 if header["version"] >= 5 else 1
+                files = header["file_entry"]
+                dirs = header["include_directory"]
+                pending: tuple[int, str, int] | None = None
+                for entry in prog.get_entries():
+                    state = entry.state
+                    if state is None:
+                        continue
+                    if pending is not None:
+                        start, path, line = pending
+                        if state.address > start:
+                            rows.append((start, state.address, path, line))
+                        pending = None
+                    if state.end_sequence:
+                        continue        # closes the sequence; carries no line of its own
+                    pending = (state.address,
+                               _dwarf_path(files, dirs, state.file - base),
+                               state.line)
+        rows.sort(key=lambda r: r[0])
+        return rows
+
+
 
 # ── disassembly ──────────────────────────────────────────────
 
@@ -628,7 +753,8 @@ def _annotate(view: ImageView, target_va: int) -> str:
     return " ".join(parts)
 
 
-def _code_lines(view: ImageView, md, start: int, end: int, count: int) -> list[dict]:
+def _code_lines(view: ImageView, md, start: int, end: int, count: int,
+                source: bool = False) -> list[dict]:
     """Decode [start, end) as instructions, resyncing over embedded data.
 
     A single ``md.disasm`` pass stops at the first byte it cannot decode and the
@@ -650,16 +776,17 @@ def _code_lines(view: ImageView, md, start: int, end: int, count: int) -> list[d
                 target = _rip_target(insn, view.arch)
             lines.append(_line(view, insn.address, insn.bytes, "insn",
                                mnemonic=insn.mnemonic, op_str=insn.op_str,
-                               target_va=target))
+                               target_va=target, source=source))
             if len(lines) >= count:
                 break
         if not progressed:
-            lines.append(_line(view, start + pos, data[pos:pos + 1], "bad"))
+            lines.append(_line(view, start + pos, data[pos:pos + 1], "bad", source=source))
             pos += 1
     return lines
 
 
-def _data_lines(view: ImageView, start: int, end: int, count: int) -> list[dict]:
+def _data_lines(view: ImageView, start: int, end: int, count: int,
+                source: bool = False) -> list[dict]:
     """Render [start, end) as strings and hex rows - never as instructions."""
     lines: list[dict] = []
     va = start
@@ -670,20 +797,22 @@ def _data_lines(view: ImageView, start: int, end: int, count: int) -> list[dict]
         text = _ascii_run(chunk)
         if text:
             raw = chunk[:len(text) + 1]
-            lines.append(_line(view, va, raw, "string", text=text))
+            lines.append(_line(view, va, raw, "string", text=text, source=source))
             va += len(raw)
             continue
         width = min(DATA_ROW_WIDTH - (va % DATA_ROW_WIDTH), end - va)
         raw = chunk[:width]
-        lines.append(_line(view, va, raw, "data", text=_printable(raw)))
+        lines.append(_line(view, va, raw, "data", text=_printable(raw), source=source))
         va += len(raw)
     return lines
 
 
 def _line(view: ImageView, va: int, raw: bytes, kind: str, mnemonic: str = "",
-          op_str: str = "", text: str = "", target_va: int | None = None) -> dict:
+          op_str: str = "", text: str = "", target_va: int | None = None,
+          source: bool = False) -> dict:
     sec = view.section_at(va)
     attr = view.attribution(va)
+    where = view.source_at(va) if source else None
     row: dict[str, Any] = {
         "va": va,
         "file_offset": view.file_offset(va),
@@ -698,6 +827,8 @@ def _line(view: ImageView, va: int, raw: bytes, kind: str, mnemonic: str = "",
         "text": text,
         "target_va": target_va,
         "target": _annotate(view, target_va) if target_va is not None else "",
+        "source_file": where[0] if where else None,
+        "source_line": where[1] if where else None,
     }
     if view.format == "pe":
         row["rva"] = va - view.image_base
@@ -711,6 +842,7 @@ def disasm_listing(
     start: int | None = None,
     end: int | None = None,
     count: int = DEFAULT_COUNT,
+    source: bool = False,
     view: ImageView | None = None,
 ) -> dict[str, Any]:
     """Annotated listing of a range, function or section.
@@ -725,6 +857,7 @@ def disasm_listing(
         function: symbol name - lists exactly that function's bounds.
         start/end: explicit VA range. ``start`` alone uses ``count`` to stop.
         count: maximum number of lines.
+        source: resolve DWARF file/line per line (ELF only; costs a DWARF parse).
         view: reuse an existing ``ImageView`` instead of re-parsing the file.
 
     Returns:
@@ -781,16 +914,17 @@ def disasm_listing(
         room = count - len(lines)
         if sec.executable:
             md = _capstone_for(view.arch)
-            chunk = _code_lines(view, md, va, stop, room)
+            chunk = _code_lines(view, md, va, stop, room, source)
         else:
-            chunk = _data_lines(view, va, stop, room)
+            chunk = _data_lines(view, va, stop, room, source)
         if not chunk:
             # No file backing (BSS) - report it rather than looping forever.
             lines.append({"va": va, "section": sec.name, "kind": "nodata",
                           "bytes_hex": "", "mnemonic": "", "op_str": "",
                           "text": "no file data (uninitialized)", "function": "",
                           "file_offset": None, "func_offset": None,
-                          "function_exact": None, "target_va": None, "target": ""})
+                          "function_exact": None, "target_va": None, "target": "",
+                          "source_file": None, "source_line": None})
             va = stop
             continue
         lines.extend(chunk)

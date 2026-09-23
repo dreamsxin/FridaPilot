@@ -266,3 +266,13 @@ If a signature changes, fix the docs in the same commit — the test will point 
   missing argument. `ImageView.entry_va` is `None` then, and the listing falls back to the first
   executable section and says so in `scope`. *(enforced:
   `tests/test_disasm_view.py::test_an_image_without_an_entry_point_still_produces_a_default_listing`)*
+- **A DWARF line table covers ranges, not everything after its last row.** The table is a set of
+  sequences, each closed by `DW_LNE_end_sequence`, and one sequence says nothing about addresses
+  past its end. "Bisect for the last row at or below this address" - the obvious lookup - gives
+  every later address the final row's file and line, so a neighbouring function reads as the last
+  line of the one that had debug info. `ImageView.source_at` keeps `(start, end)` per row and
+  returns `None` outside them. Resolution is opt-in (`source=True` / `--source`) because parsing
+  DWARF costs more than the rest of the listing combined, and PE gets only the PDB path: Windows
+  line numbers are not in the image at all. *(enforced:
+  `tests/test_disasm_view.py::test_line_info_stops_where_the_sequence_ends`,
+  `::test_pe_has_no_in_image_line_table`)*

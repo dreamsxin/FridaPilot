@@ -84,6 +84,12 @@ def _instruction_text(line: dict) -> str:
     return line.get("text", "")
 
 
+def _source_label(line: dict) -> str:
+    if line.get("source_file") and line.get("source_line"):
+        return f"{line['source_file']}:{line['source_line']}"
+    return ""
+
+
 def _print_header(out: Console, result: dict) -> None:
     out.print(f"[bold]{result['path']}[/bold]  {result['format'].upper()} "
               f"{result['arch']}/{result['bits']}  "
@@ -95,7 +101,7 @@ def _print_header(out: Console, result: dict) -> None:
 
 def _render_group(out: Console, result: dict) -> None:
     """objdump-like: a header per section, a sub-header per function."""
-    cur_section = cur_function = None
+    cur_section = cur_function = cur_source = None
     for line in result["lines"]:
         if line["section"] != cur_section:
             cur_section = line["section"]
@@ -104,6 +110,7 @@ def _render_group(out: Console, result: dict) -> None:
             out.print(f"\n[{style} bold]{cur_section or '(no section)'}[/{style} bold]")
         if line["function"] != cur_function:
             cur_function = line["function"]
+            cur_source = None
             if cur_function:
                 # '?' marks an implied end: the symbol source recorded no size, so the
                 # function was attributed from the preceding symbol. Not a measurement.
@@ -111,13 +118,19 @@ def _render_group(out: Console, result: dict) -> None:
                 out.print(f"  [cyan bold]{_safe(cur_function)}[/cyan bold]:{mark}")
             else:
                 out.print("  [dim](no symbol)[/dim]")
+        source = _source_label(line)
+        if source and source != cur_source:
+            # Printed once per change, the way objdump -S groups by source line -
+            # repeating it on every instruction buries the disassembly.
+            cur_source = source
+            out.print(f"    [magenta]; {_safe(source, 120)}[/magenta]")
         target = f"   [cyan]; {_safe(line['target'], 90)}[/cyan]" if line["target"] else ""
         out.print(f"    [dim]{line['va']:016x}[/dim]  "
                   f"[dim]{line['bytes_hex'][:32]:<32s}[/dim]  "
                   f"{_safe(_instruction_text(line))}{target}")
 
 
-def _render_table(out: Console, result: dict, show_bytes: bool) -> None:
+def _render_table(out: Console, result: dict, show_bytes: bool, show_source: bool) -> None:
     table = Table(show_lines=False, header_style="bold")
     table.add_column("Address", style="dim", no_wrap=True)
     if show_bytes:
@@ -125,6 +138,8 @@ def _render_table(out: Console, result: dict, show_bytes: bool) -> None:
     table.add_column("Instruction")
     table.add_column("Section", no_wrap=True)
     table.add_column("Function", style="cyan")
+    if show_source:
+        table.add_column("Source", style="magenta", no_wrap=True)
     for line in result["lines"]:
         style = _section_style(line["section"])
         func = line["function"] or ""
@@ -137,6 +152,8 @@ def _render_table(out: Console, result: dict, show_bytes: bool) -> None:
             row.append(line["bytes_hex"][:32])
         row += [_safe(_instruction_text(line), 90),
                 f"[{style}]{line['section']}[/{style}]", _safe(func, 80)]
+        if show_source:
+            row.append(_safe(_source_label(line), 80))
         table.add_row(*row)
     out.print(table)
 
@@ -154,15 +171,17 @@ def view_cmd(
     fmt: str = typer.Option("group", "--format", help="group, table or json."),
     show_bytes: bool = typer.Option(True, "--show-bytes/--no-bytes",
                                     help="Show raw bytes in the table view."),
+    source: bool = typer.Option(False, "--source", "-S",
+                                help="Resolve DWARF file:line per line (ELF only)."),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colour."),
     output: str = typer.Option("", "--output", "-o", help="Write to a file instead of stdout."),
 ) -> None:
     """Disassembly with the address, section and owning function on every line.
 
     Addresses are VIRTUAL addresses (ImageBase applied for PE, link-time for ELF),
-    not file offsets - unlike `fp binary disassemble --address`. Non-executable
-    sections are shown as strings and hex rows rather than decoded, because feeding
-    .rdata to a disassembler yields instructions that never execute.
+    not file offsets - unlike `fp binary disassemble`. Non-executable sections are
+    shown as strings and hex rows rather than decoded, because feeding .rdata to a
+    disassembler yields instructions that never execute.
 
     Default scope is the entry point; pass --section, --function or --start/--end.
     """
@@ -180,6 +199,7 @@ def view_cmd(
             start=int(start, 0) if start else None,
             end=int(end, 0) if end else None,
             count=count,
+            source=source,
         )
     except ValueError as exc:
         err_console.print(f"[red]{exc}[/red]")
@@ -196,7 +216,7 @@ def view_cmd(
     try:
         _print_header(out, result)
         if fmt == "table":
-            _render_table(out, result, show_bytes)
+            _render_table(out, result, show_bytes, source)
         else:
             _render_group(out, result)
         if result["truncated"]:

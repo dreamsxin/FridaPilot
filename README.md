@@ -127,7 +127,7 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 
 
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
-| `fp disasm view <file>` | **带符号与节区信息的反汇编列表**：每行同时给出 VA / 原始字节 / 指令 / 所属节区 / 所属函数；PE/ELF/Mach-O 通用，`--section` `--function` `--start/--end` 过滤，`--format group\|table\|json` | ❌ |
+| `fp disasm view <file>` | **带符号与节区信息的反汇编列表**：每行同时给出 VA / 原始字节 / 指令 / 所属节区 / 所属函数；PE/ELF/Mach-O 通用，`--section` `--function` `--start/--end` 过滤，`--format group\|table\|json`，`--source` 附带 DWARF 源文件:行号 | ❌ |
 | `fp disasm sections <file>` | 节区表：VA 区间、文件偏移、读写执行权限、落在其中的符号数 | ❌ |
 | `fp disasm symbols <file>` | 函数符号表：地址、大小、所属节区、名字来源（symtab/dynsym/export/coff/nlist） | ❌ |
 | `fp apk analyze <apk>` | APK 静态分析（manifest/权限/组件/native 库/签名/保护特征） | ❌ |
@@ -262,6 +262,9 @@ fp disasm view target.dll --section .text --count 60
 # 表格视图，适合过滤与比对
 fp disasm view a.out --function main --format table
 
+# 带源文件/行号（ELF DWARF；默认关闭，因为解析 DWARF 是这里最贵的一步）
+fp disasm view a.out --function main --source
+
 # 机器可读，接其他工具
 fp disasm view lib.so --section .text --format json --output out.json
 
@@ -280,6 +283,7 @@ fp disasm symbols target.dll --pattern decrypt
 - **Mach-O 的代码判定看节区属性而非段权限**：`__TEXT` 是 r-x 且内含 `__cstring`，只看 `VM_PROT_EXECUTE` 会把字符串字面量当代码反汇编
 - **遇到数据字节会重新同步并把它标成 `bad`**，而不是像单次 `md.disasm` 那样在第一个无法解码的字节处静默结束（跳转表、对齐填充都会触发）
 - **范围有上限**（默认 200 行 / 512 KB 解码），截断时在输出里说明，不假装扫完了
+- **源码行号（`--source`）只覆盖 DWARF 记录的范围**：ELF 的行号表按「序列」组织，每段以 `DW_LNE_end_sequence` 结束，序列之外没有行号。常见错误实现是「二分找到不大于该地址的最后一行」，那样每个越界地址都会拿到最后一行的文件名和行号。Windows 的行号在 PDB 里而不在镜像里，所以 PE 只会告诉你 PDB 路径
 
 
 ### PE 逆向分析策略（决策顺序）
