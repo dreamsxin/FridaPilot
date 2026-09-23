@@ -367,7 +367,92 @@ def test_an_unknown_mode_is_reported(elf_image):
                                             mode="descent")["error"]
 
 
+# ── several sections, filtering, CSV ─────────────────────────
+
+
+def test_several_sections_are_listed_in_the_order_requested(pe_image):
+    """One call covers a comma-separated list, and keeps the caller's order.
+
+    Requesting `.pdata,.rdata` lists .pdata first even though it sits at a higher
+    address: the order is the question that was asked, not the address layout.
+    """
+    path, _placed, _end = pe_image
+    forward = disasm_listing(path, section=".pdata,.rdata", count=60)
+    assert {ln["section"] for ln in forward["lines"]} == {".pdata", ".rdata"}
+    assert forward["lines"][0]["section"] == ".pdata"
+
+    reverse = disasm_listing(path, section=".rdata,.pdata", count=60)
+    assert reverse["lines"][0]["section"] == ".rdata"
+    assert forward["scope"] == "section .pdata, .rdata"
+
+
+def test_an_unknown_name_in_a_section_list_is_named_in_the_error(pe_image):
+    path, _placed, _end = pe_image
+    error = disasm_listing(path, section=".text,.nope")["error"]
+    assert ".nope" in error and ".text" in error
+
+
+def test_grep_keeps_matching_lines_and_reports_what_it_scanned(pe_image):
+    """A filter that hides how much it looked at invites "there are no calls" errors."""
+    path, _placed, _end = pe_image
+    result = disasm_listing(path, section=".text", grep="^call", count=10)
+    assert result["lines"]
+    assert all(ln["mnemonic"] == "call" for ln in result["lines"])
+    assert result["scanned"] > len(result["lines"])
+    assert any("matched" in note for note in result["notes"])
+    assert result["grep"] == "^call"
+
+
+def test_grep_matches_the_instruction_not_the_function_column(pe_image):
+    """The haystack is the instruction, its resolved target and a data row's text.
+
+    Matching the function or section column too would make `--grep call` fire on a
+    function named `recall`, and a filter whose hits cannot be predicted from the
+    pattern is worse than no filter.
+    """
+    path, _placed, _end = pe_image
+    named = disasm_listing(path, section=".text", count=20)
+    assert named["lines"][0]["function"].startswith("sub_")
+
+    result = disasm_listing(path, section=".text", grep="sub_1000", count=20)
+    assert result["lines"] == []
+
+
+def test_a_bad_grep_pattern_is_reported_not_raised(pe_image):
+    path, _placed, _end = pe_image
+    assert "bad --grep pattern" in disasm_listing(path, section=".text",
+                                                  grep="(")["error"]
+
+
+def test_csv_export_has_a_fixed_header_and_hex_addresses(pe_image, tmp_path):
+    """A CSV whose columns move with the data is not something a script can read."""
+    import csv
+
+    from typer.testing import CliRunner
+
+    from fridapilot.cli.disasm import CSV_COLUMNS
+    from fridapilot.cli.main import app
+
+    path, _placed, _end = pe_image
+    out = tmp_path / "listing.csv"
+    result = CliRunner().invoke(app, ["disasm", "view", path, "--section", ".text",
+                                      "--count", "6", "--format", "csv",
+                                      "--output", str(out)])
+    assert result.exit_code == 0, result.output
+    with open(out, newline="", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    assert tuple(rows[0]) == CSV_COLUMNS
+    assert len(rows) == 7                       # header plus six lines
+    expected = disasm_listing(path, section=".text", count=6)["lines"]
+    for row, line in zip(rows[1:], expected):
+        record = dict(zip(CSV_COLUMNS, row))
+        assert int(record["va"], 16) == line["va"]
+        assert record["section"] == line["section"]
+        assert record["mnemonic"] == line["mnemonic"]
+
+
 # ── range handling ───────────────────────────────────────────
+
 
 
 

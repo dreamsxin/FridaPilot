@@ -127,7 +127,7 @@ python -m fridapilot.scripts.windows_agent --target YourApp.exe
 
 
 | `fp binary disasm-rva <file>` | RVA-aware 反汇编（ImageBase 正确 + rip/call 目标标注） | ❌ |
-| `fp disasm view <file>` | **带符号与节区信息的反汇编列表**：每行同时给出 VA / 原始字节 / 指令 / 所属节区 / 所属函数；PE/ELF/Mach-O 通用，`--section` `--function` `--start/--end` 过滤，`--format group\|table\|json`，`--source` 附带 DWARF 源文件:行号，`--mode recursive` 只反汇编控制流可达的字节 | ❌ |
+| `fp disasm view <file>` | **带符号与节区信息的反汇编列表**：每行同时给出 VA / 原始字节 / 指令 / 所属节区 / 所属函数；PE/ELF/Mach-O 通用，`--section` `--function` `--start/--end` 过滤，`--format group\|table\|json\|csv`，`--source` 附带 DWARF 源文件:行号，`--mode recursive` 只反汇编控制流可达的字节，`--grep` 正则过滤指令 | ❌ |
 | `fp disasm sections <file>` | 节区表：VA 区间、文件偏移、读写执行权限、落在其中的符号数 | ❌ |
 | `fp disasm symbols <file>` | 函数符号表：地址、大小、所属节区、名字来源（symtab/dynsym/export/coff/nlist） | ❌ |
 | `fp apk analyze <apk>` | APK 静态分析（manifest/权限/组件/native 库/签名/保护特征） | ❌ |
@@ -268,6 +268,14 @@ fp disasm view a.out --function main --source
 # 递归下降：只反汇编控制流能到达的字节，其余标成 unreached
 fp disasm view target.dll --function DllMain --mode recursive
 
+# 多个节区一次列出（保持请求顺序），正则过滤指令
+fp disasm view target.dll -s .text -s .rdata --count 400
+fp disasm view target.dll --section .text --grep "^call"
+
+# CSV 导出，列固定，地址为十六进制
+fp disasm view target.dll --section .text --format csv --output listing.csv
+
+
 
 # 机器可读，接其他工具
 fp disasm view lib.so --section .text --format json --output out.json
@@ -288,6 +296,8 @@ fp disasm symbols target.dll --pattern decrypt
 - **遇到数据字节会重新同步并把它标成 `bad`**，而不是像单次 `md.disasm` 那样在第一个无法解码的字节处静默结束（跳转表、对齐填充都会触发）
 - **范围有上限**（默认 200 行 / 512 KB 解码），截断时在输出里说明，不假装扫完了
 - **源码行号（`--source`）只覆盖 DWARF 记录的范围**：ELF 的行号表按「序列」组织，每段以 `DW_LNE_end_sequence` 结束，序列之外没有行号。常见错误实现是「二分找到不大于该地址的最后一行」，那样每个越界地址都会拿到最后一行的文件名和行号。Windows 的行号在 PDB 里而不在镜像里，所以 PE 只会告诉你 PDB 路径
+- **`--grep` 只匹配指令、解析出的目标标注和数据行文本**，不匹配地址、节区名或函数名——否则 `--grep call` 会命中一个叫 `recall` 的函数，而命中范围无法从模式预测的过滤器比没有过滤器更糟。过滤是在解码结果上做的，`--count` 限制的是**命中行数**，扫描上限另算；输出里会写明「命中 N / 扫描 M 行」，扫描没跑到范围末尾时也会说明，避免把「扫描不全」读成「没有更多命中」
+- **`--format csv` 的列是写死的**（`va,rva,file_offset,section,function,...`），不是从第一行的 key 推出来的：那样列顺序会随先出现哪类行而变，脚本没法消费。地址列输出十六进制
 - **`--mode recursive` 只反汇编控制流到达的字节**：函数体里的跳转表、内联常量、对齐填充在线性扫描下会被当成指令，而且错位重同步之后会产出程序里根本不存在的指令（fixture 里 `eb 02 / ff ff / 31 c0` 就是这个形状：线性模式给出 `push qword [rcx]`）。种子不只是起始地址，还包括范围内所有函数符号——虚函数、绑定表项、回调只通过指针到达，没有任何分支指令指向它们，只从入口递归会把它们全部漏掉。反过来，递归模式**无法证明**跳过的字节不是代码（间接跳转的目标是静态不可知的），所以未到达区间会以 `unreached` 行列出而不是丢弃，并带 `span` 字段，便于校验「解码字节 + 未到达字节 == 请求范围」。ntdll 全 `.text` 递归取 200 行实测 0.56s
 
 

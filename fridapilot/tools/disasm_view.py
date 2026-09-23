@@ -27,6 +27,7 @@ listing builder on top. Three properties are deliberate:
 from __future__ import annotations
 
 import bisect
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -972,6 +973,7 @@ def disasm_listing(
     count: int = DEFAULT_COUNT,
     source: bool = False,
     mode: str = "linear",
+    grep: str | None = None,
     view: ImageView | None = None,
 ) -> dict[str, Any]:
     """Annotated listing of a range, function or section.
@@ -982,37 +984,52 @@ def disasm_listing(
     section boundary is split so each part is treated according to its own flags.
 
     Args:
-        section: section name (``.text``, ``__text``) - lists that section.
+        section: section name, or several comma-separated (``.text,.rdata``).
         function: symbol name - lists exactly that function's bounds.
         start/end: explicit VA range. ``start`` alone uses ``count`` to stop.
-        count: maximum number of lines.
+        count: maximum number of lines (matching lines, when ``grep`` is given).
         source: resolve DWARF file/line per line (ELF only; costs a DWARF parse).
         mode: ``linear`` decodes every byte in order; ``recursive`` follows branches
             from the range start and every function symbol in it, and reports what no
             path reached as ``unreached`` rows instead of decoding it.
+        grep: case-insensitive regex kept against the instruction, its resolved target
+            and the text of a data row - not the address or the section name.
         view: reuse an existing ``ImageView`` instead of re-parsing the file.
 
     Returns:
-        {path, format, arch, bits, image_base, entry_va, start_va, end_va,
-         scope, mode, truncated, notes, lines}
+        {path, format, arch, bits, image_base, entry_va, start_va, end_va, scope,
+         mode, grep, scanned, truncated, notes, lines}
     """
     view = view or ImageView(binary_path)
     if mode not in ("linear", "recursive"):
         return _empty(view, error=f"unknown mode {mode!r} (linear, recursive)")
+    keep = None
+    if grep:
+        try:
+            keep = re.compile(grep, re.IGNORECASE)
+        except re.error as exc:
+            return _empty(view, error=f"bad --grep pattern {grep!r}: {exc}")
+
+    ranges: list[tuple[int, int]] = []
     scope = ""
     if function:
         sym = view.find_function(function)
         if sym is None:
             return _empty(view, error=f"no symbol named {function!r} in {view.path}")
-        start, end = view.function_range(sym)
+        ranges = [view.function_range(sym)]
         scope = f"function {sym.name}"
     elif section:
-        sec = view.find_section(section)
-        if sec is None:
-            names = ", ".join(s.name for s in view.sections)
-            return _empty(view, error=f"no section named {section!r} (have: {names})")
-        start, end = sec.va, sec.end_va
-        scope = f"section {sec.name}"
+        # Comma-separated, like `xrefs-rva --kinds` and `find-string-rva`: one call
+        # over several sections beats N calls whose caps and notes have to be merged
+        # by hand.
+        wanted = [name.strip() for name in section.split(",") if name.strip()]
+        for name in wanted:
+            sec = view.find_section(name)
+            if sec is None:
+                names = ", ".join(s.name for s in view.sections)
+                return _empty(view, error=f"no section named {name!r} (have: {names})")
+            ranges.append((sec.va, sec.end_va))
+        scope = "section " + ", ".join(wanted)
     elif start is None:
         # Default scope. An entry point only helps if it is inside a section: a DLL
         # without one (AddressOfEntryPoint == 0) would otherwise produce an empty
@@ -1025,68 +1042,104 @@ def disasm_listing(
             if first is None:
                 return _empty(view, error="no entry point and no executable section: "
                                           "pass --section, --function or --start")
-            start, end = first.va, first.end_va
+            ranges = [(first.va, first.end_va)]
             scope = f"section {first.name} (no entry point in this image)"
-    if end is None:
-        # 16 bytes is the longest x86 instruction; ARM is fixed-width and shorter.
-        end = start + count * 16
-    if end <= start:
-        return _empty(view, error=f"empty range 0x{start:x}..0x{end:x}")
+    if not ranges:
+        if end is None:
+            # 16 bytes is the longest x86 instruction; ARM is fixed-width and shorter.
+            end = start + count * 16
+        if end <= start:
+            return _empty(view, error=f"empty range 0x{start:x}..0x{end:x}")
+        ranges = [(start, end)]
 
-    lines: list[dict] = []
-    va = start
+    # With a filter, `count` caps the *matching* rows, so more than `count` rows have
+    # to be produced before trimming. The scan cap is what keeps that bounded, and a
+    # scan that ends early is reported instead of passing for "no more matches".
+    scan_cap = count if keep is None else max(count * 50, 5000)
+    rows: list[dict] = []
     truncated = False
-    while va < end and len(lines) < count:
-        sec = view.section_at(va)
-        if sec is None:
-            nxt = next((s.va for s in view.sections if s.va > va), None)
-            if nxt is None or nxt >= end:
-                break
-            va = nxt                     # skip an inter-section hole
-            continue
-        stop = min(sec.end_va, end)
-        room = count - len(lines)
-        if sec.executable:
-            md = _capstone_for(view.arch)
-            if mode == "recursive":
-                chunk = _recursive_lines(view, md, va, stop, room, source)
+    stopped_at: int | None = None
+    for range_start, range_end in ranges:
+        va = range_start
+        while va < range_end and len(rows) < scan_cap:
+            sec = view.section_at(va)
+            if sec is None:
+                nxt = next((s.va for s in view.sections if s.va > va), None)
+                if nxt is None or nxt >= range_end:
+                    va = range_end
+                    break
+                va = nxt                     # skip an inter-section hole
+                continue
+            stop = min(sec.end_va, range_end)
+            room = scan_cap - len(rows)
+            if sec.executable:
+                md = _capstone_for(view.arch)
+                if mode == "recursive":
+                    chunk = _recursive_lines(view, md, va, stop, room, source)
+                else:
+                    chunk = _code_lines(view, md, va, stop, room, source)
             else:
-                chunk = _code_lines(view, md, va, stop, room, source)
-        else:
-            chunk = _data_lines(view, va, stop, room, source)
-        if not chunk:
-            # No file backing (BSS) - report it rather than looping forever.
-            lines.append({"va": va, "section": sec.name, "kind": "nodata",
-                          "bytes_hex": "", "mnemonic": "", "op_str": "",
-                          "text": "no file data (uninitialized)", "function": "",
-                          "file_offset": None, "func_offset": None,
-                          "function_exact": None, "target_va": None, "target": "",
-                          "span": stop - va,
-                          "source_file": None, "source_line": None})
-            va = stop
-            continue
-        lines.extend(chunk)
-        if mode == "recursive" and sec.executable:
-            # A recursive chunk accounts for the whole sub-range - decoded rows plus
-            # `unreached` rows - unless the line cap trimmed it, in which case the
-            # loop is about to end and the last address is what was actually reached.
-            va = chunk[-1]["va"] if len(chunk) >= room else stop
-        else:
-            last = chunk[-1]
-            va = last["va"] + max(len(last["bytes_hex"]) // 2, 1)
-    if va < end:
+                chunk = _data_lines(view, va, stop, room, source)
+            if not chunk:
+                # No file backing (BSS) - report it rather than looping forever.
+                rows.append({"va": va, "section": sec.name, "kind": "nodata",
+                             "bytes_hex": "", "mnemonic": "", "op_str": "",
+                             "text": "no file data (uninitialized)", "function": "",
+                             "file_offset": None, "func_offset": None,
+                             "function_exact": None, "target_va": None, "target": "",
+                             "span": stop - va,
+                             "source_file": None, "source_line": None})
+                va = stop
+                continue
+            rows.extend(chunk)
+            if mode == "recursive" and sec.executable:
+                # A recursive chunk accounts for the whole sub-range - decoded rows
+                # plus `unreached` rows - unless the cap trimmed it, in which case the
+                # loop is about to end and the last address is what was reached.
+                va = chunk[-1]["va"] if len(chunk) >= room else stop
+            else:
+                last = chunk[-1]
+                va = last["va"] + max(len(last["bytes_hex"]) // 2, 1)
+        if va < range_end:
+            truncated = True
+            stopped_at = va
+            break
+
+    scanned = len(rows)
+    if keep is not None:
+        rows = [r for r in rows if keep.search(_row_haystack(r))]
+    if len(rows) > count:
+        rows = rows[:count]
         truncated = True
 
     out = _empty(view)
     out.update({
-        "start_va": start, "end_va": end, "scope": scope, "mode": mode,
-        "truncated": truncated, "lines": lines,
+        "start_va": ranges[0][0], "end_va": ranges[-1][1], "scope": scope, "mode": mode,
+        "grep": grep or "", "scanned": scanned, "truncated": truncated, "lines": rows,
     })
+    notes = list(out["notes"])
     if truncated:
-        out["notes"] = out["notes"] + [
-            f"stopped at 0x{va:x} of 0x{end:x}: line cap {count} or byte cap "
-            f"{MAX_DECODE_BYTES} reached - raise --count or narrow the range"]
+        where = f"0x{stopped_at:x}" if stopped_at is not None else "the line cap"
+        notes.append(
+            f"stopped at {where}: line cap {count}, scan cap {scan_cap} or byte cap "
+            f"{MAX_DECODE_BYTES} reached - raise --count or narrow the range")
+    if keep is not None:
+        notes.append(f"--grep {grep!r} matched {len(rows)} of {scanned} scanned rows"
+                     + ("; the scan did not reach the end of the range, so later "
+                        "matches are not counted" if truncated else ""))
+    out["notes"] = notes
     return out
+
+
+def _row_haystack(row: dict) -> str:
+    """What ``grep`` matches against: the instruction, its annotation and its text.
+
+    Deliberately not the whole record: matching the address or the section name would
+    make `--grep call` also fire on a function called `recall` in the Function column,
+    and a filter whose hits cannot be predicted is worse than no filter.
+    """
+    return " ".join(str(row.get(k) or "")
+                    for k in ("mnemonic", "op_str", "text", "target"))
 
 
 def _empty(view: ImageView, error: str | None = None) -> dict[str, Any]:
@@ -1094,6 +1147,7 @@ def _empty(view: ImageView, error: str | None = None) -> dict[str, Any]:
         "path": view.path, "format": view.format, "arch": view.arch,
         "bits": view.bits, "image_base": view.image_base, "entry_va": view.entry_va,
         "start_va": None, "end_va": None, "scope": "", "mode": "linear",
+        "grep": "", "scanned": 0,
         "truncated": False, "notes": list(view.notes), "lines": [],
     }
     if error:

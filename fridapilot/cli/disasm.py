@@ -67,6 +67,39 @@ def _emit_json(obj, output: str) -> None:
         sys.stdout.write(text)
 
 
+# Column order for --format csv. Fixed and explicit: deriving it from the first row's
+# keys would silently reorder or drop columns depending on which kind of row came
+# first, and a CSV whose header moves is not something a script can consume.
+CSV_COLUMNS = ("va", "rva", "file_offset", "section", "function", "func_offset",
+               "function_exact", "kind", "bytes_hex", "mnemonic", "op_str", "text",
+               "span", "target_va", "target", "source_file", "source_line")
+
+
+def _emit_csv(result: dict, output: str) -> None:
+    """Write the lines as CSV; addresses stay hex so they read like the other views."""
+    import csv
+
+    stream = open(output, "w", encoding="utf-8", newline="") if output else sys.stdout
+    try:
+        writer = csv.writer(stream)
+        writer.writerow(CSV_COLUMNS)
+        for line in result["lines"]:
+            row = []
+            for column in CSV_COLUMNS:
+                value = line.get(column)
+                if value is None:
+                    row.append("")
+                elif column in ("va", "rva", "file_offset", "target_va"):
+                    row.append(f"0x{value:x}")
+                else:
+                    row.append(value)
+            writer.writerow(row)
+    finally:
+        if output:
+            stream.close()
+            err_console.print(f"[dim]wrote {output}[/dim]")
+
+
 def _safe(text: str, limit: int = 120) -> str:
     """Make a string lifted out of a binary printable on THIS console."""
     cleaned = "".join(c if c.isprintable() else "." for c in text[:limit])
@@ -164,20 +197,22 @@ def _render_table(out: Console, result: dict, show_bytes: bool, show_source: boo
 @disasm_app.command("view")
 def view_cmd(
     binary: str = typer.Argument(..., help="Path to a PE, ELF or Mach-O image."),
-    section: str = typer.Option("", "--section", "-s",
-                                help="List this section (.text, __text, ...)."),
+    section: list[str] = typer.Option([], "--section", "-s",
+                                      help="Section to list; repeat for several."),
     function: str = typer.Option("", "--function", "-f",
                                  help="List exactly this function's bounds."),
     start: str = typer.Option("", "--start", help="Start virtual address (hex/decimal)."),
     end: str = typer.Option("", "--end", help="End virtual address (exclusive)."),
     count: int = typer.Option(200, "--count", "-n", help="Maximum lines."),
-    fmt: str = typer.Option("group", "--format", help="group, table or json."),
+    fmt: str = typer.Option("group", "--format", help="group, table, json or csv."),
     show_bytes: bool = typer.Option(True, "--show-bytes/--no-bytes",
                                     help="Show raw bytes in the table view."),
     source: bool = typer.Option(False, "--source", "-S",
                                 help="Resolve DWARF file:line per line (ELF only)."),
     mode: str = typer.Option("linear", "--mode", "-m",
                              help="linear (decode every byte) or recursive (follow branches)."),
+    grep: str = typer.Option("", "--grep", "-g",
+                             help="Keep only lines matching this regex (instruction/target/text)."),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colour."),
     output: str = typer.Option("", "--output", "-o", help="Write to a file instead of stdout."),
 ) -> None:
@@ -198,19 +233,20 @@ def view_cmd(
     from fridapilot.tools.disasm_view import disasm_listing
 
     _require_file(binary)
-    if fmt not in ("group", "table", "json"):
-        err_console.print(f"[red]Unknown --format {fmt!r}[/red] (group, table, json)")
+    if fmt not in ("group", "table", "json", "csv"):
+        err_console.print(f"[red]Unknown --format {fmt!r}[/red] (group, table, json, csv)")
         raise typer.Exit(1)
     try:
         result = disasm_listing(
             binary,
-            section=section or None,
+            section=",".join(section) if section else None,
             function=function or None,
             start=int(start, 0) if start else None,
             end=int(end, 0) if end else None,
             count=count,
             source=source,
             mode=mode,
+            grep=grep or None,
         )
     except ValueError as exc:
         err_console.print(f"[red]{exc}[/red]")
@@ -222,6 +258,9 @@ def view_cmd(
     if result.get("error"):
         err_console.print(f"[red]{_safe(result['error'], 300)}[/red]")
         raise typer.Exit(1)
+    if fmt == "csv":
+        _emit_csv(result, output)
+        return
 
     out, fh = _open_console(output, no_color)
     try:
