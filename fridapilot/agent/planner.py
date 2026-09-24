@@ -245,6 +245,16 @@ When target is an iOS/macOS app, follow this specialized pipeline:
 - pe_rva.function_callees(path, rva) -> What this function calls, each callee labelled the
   same way. The other half of function_xrefs. Direct `call 0x...` only: an indirect
   `call rax` names no callee in the instruction stream
+- pe_rva.function_strings(path, ranges) -> The addressed form of describe_function: for each
+  range ([begin, end], or [rva, null] to take the bounds from .pdata) every literal the body
+  references, with from_rva, target_rva, section, encoding and kind. Prefer this when the answer
+  has to be checked - a rip displacement landing beside an unrelated literal reads exactly like a
+  real hit, and only the target address disproves it. Each range reports decoded_bytes/complete,
+  so a partial scan cannot pass for a finished one
+- pe_rva.strings_in_range(path, start_rva, end_rva, section) -> Strings in one RVA range or
+  section, in address order. This is how a *table* becomes visible: adjacent vendor
+  base::Feature names, a config key list, an endpoint set. A whole-file string scan keeps the
+  first N by offset and never reaches .rdata on a large image
 - pe_rva.map_refs_to_functions(path, strings, start, end) -> Map multiple strings to their consuming functions in one pass
 - rip_index.build_rip_index(path, section) -> Scan the section ONCE and persist every rip
   reference into data sections. Afterwards xrefs_to_rva answers rip queries from the index

@@ -672,3 +672,70 @@ analysis found the function; dynamic analysis reads its arguments.
   test + jne` on a global in Chromium is often PGO hot/cold splitting rather than the real
   feature gate, so follow the writes (`field_refs`, `xrefs_to_rva` with `kinds=("rip",)`) before
   concluding you found the switch.
+
+## Addressed string queries
+
+Two functions answer the questions that come up constantly on a stripped image, both keyed by
+RVA so an answer can be checked rather than believed.
+
+**What does this function reference?** `function_strings(path, ranges)` — ranges are
+`(begin_rva, end_rva)` pairs, or `(rva, None)` to take the bounds from `.pdata`.
+
+```python
+from fridapilot.tools.pe_rva import function_strings, strings_in_range
+
+result = function_strings("chrome.dll", [(0x3402740, 0x3402933), (0x3402b40, None)])
+for entry in result["ranges"]:
+    for row in entry["strings"]:
+        print(hex(row["from_rva"]), hex(row["target_rva"] or 0), row["section"], row["text"])
+```
+
+<!-- return-keys: function_strings = path, ranges, total, notes -->
+Top level: `path`, `ranges`, `total`, `notes`. Each range: `begin_rva`, `end_rva`, `size`,
+`has_bounds`, `decoded_bytes`, `complete`, `truncated`, `count`, `strings`. Each row:
+`from_rva`, `target_rva`, `section`, `encoding`, `kind`, `text`.
+
+- **The addresses are the point.** `describe_function` gives the same text as a summary; this
+  gives `from_rva` (the referencing instruction) and `target_rva` with its section. A rip
+  displacement that lands beside an unrelated literal — a shader source, a V8 error table —
+  reads exactly like a real hit, and the target address is what disproves it.
+- **`complete` is per range.** `decoded_bytes` is what was actually read: `read_rva` returns
+  nothing for an unmapped RVA and truncates at the section end, so a range that could not be
+  decoded says so instead of coming back looking surveyed. `notes` names every range it cut
+  short.
+- `kind` is `source_path` / `symbol` / `text` / `inline`. For `inline`, `target_rva` is `None` —
+  the characters live in the opcode bytes and there is no address to report.
+
+**What is in this neighbourhood?** `strings_in_range(path, start_rva, end_rva, section)`.
+
+```python
+table = strings_in_range("chrome.dll", start_rva=0x10224cd0, end_rva=0x10224ef0)
+features = strings_in_range("chrome.dll", section=".rdata", contains="SmartPaste")
+```
+
+<!-- return-keys: strings_in_range = path, section, start_rva, end_rva, scanned_bytes, complete, count, truncated, encodings_scanned, strings -->
+Top level: `path`, `section`, `start_rva`, `end_rva`, `scanned_bytes`, `complete`, `count`,
+`truncated`, `encodings_scanned`, `strings`. Each row: `rva`, `offset`, `encoding`, `length`,
+`terminated`, `text`.
+
+- **A whole-file scan cannot answer this.** `find_strings` keeps the first `limit` rows by
+  offset, so on a 250 MB image it returns header junk and never reaches `.rdata`. Aiming at a
+  range is also what makes a *table* visible: adjacent vendor `base::Feature` names, a config key
+  list, an endpoint set are obvious in address order and invisible in a whole-file dump.
+- `terminated=False` marks a printable run with no NUL after it — bytes inside a pointer table
+  that only look like text.
+- `encoding` defaults to `ascii`; wide strings need `encoding="utf16le"` or `"all"`, and
+  `encodings_scanned` reports which passes actually ran (with a row limit, the ascii pass can use
+  it up before utf16le starts, and an empty result would otherwise read as "no wide strings").
+- Pass `contains` rather than filtering afterwards: it is applied inside the scan.
+
+From the CLI, with `fp target add` to avoid retyping a long path (quote the alias on
+PowerShell, where bare `@name` is splatting syntax and gets eaten by the shell):
+
+```bash
+fp target add anty "C:\path\to\chrome.dll"
+fp binary func-strings "@anty" 0x3402740-0x3402933 0x3402b40 --kind source_path
+fp binary strings-rva "@anty" --start 0x10224cd0 --end 0x10224ef0
+fp binary strings-rva "@anty" --section .rdata --encoding utf16le --contains Feature
+```
+

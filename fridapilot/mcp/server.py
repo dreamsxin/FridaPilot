@@ -493,6 +493,47 @@ def binary_describe_function(binary_path: str, rva: int, budget: int = 8192) -> 
 
 
 @mcp.tool()
+def binary_function_strings(binary_path: str, ranges: list[str], budget: int = 0,
+                            min_len: int = 4, limit: int = 0) -> dict[str, Any]:
+    """Every literal the given code ranges reference, with the address on both ends.
+
+    The addressed form of binary_describe_function, and the one to use when the answer has
+    to be checked. Each range is "0xBEGIN-0xEND", or "0xRVA" to take the bounds from .pdata.
+    Rows carry from_rva (the referencing instruction), target_rva, the target's section,
+    encoding and kind (source_path / symbol / text / inline): a rip displacement that lands
+    beside an unrelated literal - a shader source, a V8 error table - reads exactly like a
+    real hit, and only the target address disproves it. Each range also reports
+    decoded_bytes and complete, so a range that could not be read end to end never passes
+    for a finished scan. target_rva is null for an inline-constructed string, whose
+    characters live in the opcode bytes."""
+    return _dispatch("binary_function_strings", {
+        "binary_path": binary_path, "ranges": ranges, "budget": budget,
+        "min_len": min_len, "limit": limit,
+    })
+
+
+@mcp.tool()
+def binary_strings_in_range(binary_path: str, section: str = "", start_rva: int = 0,
+                            end_rva: int = 0, min_len: int = 4, encoding: str = "ascii",
+                            limit: int = 5000, contains: str = "") -> dict[str, Any]:
+    """Strings inside one RVA range or section, keyed by RVA and in address order.
+
+    binary_find_strings scans the whole file and keeps the first N rows by offset, so on a
+    250 MB image it returns header junk and never reaches .rdata. Aiming at a range is also
+    the only way a *table* becomes visible: a run of adjacent literals - vendor
+    base::Feature names, a config key list, an endpoint set - is obvious in address order
+    and invisible in a whole-file dump. Pass `contains` to filter inside the scan rather
+    than over the result. Rows carry rva, offset, encoding, length, terminated and text;
+    terminated=false marks a printable run with no NUL after it, i.e. bytes inside a
+    pointer table that only look like text."""
+    return _dispatch("binary_strings_in_range", {
+        "binary_path": binary_path, "section": section, "start_rva": start_rva,
+        "end_rva": end_rva, "min_len": min_len, "encoding": encoding,
+        "limit": limit, "contains": contains,
+    })
+
+
+@mcp.tool()
 def binary_callees(binary_path: str, rva: int, budget: int = 8192,
                    label: bool = True) -> dict[str, Any]:
     """What a function calls, each callee labelled by the strings in its body - the other
@@ -1123,6 +1164,36 @@ def _handle_tool(name: str, arguments: dict[str, Any]) -> Any:
         from fridapilot.tools.pe_rva import describe_function
         return describe_function(arguments["binary_path"], int(arguments["rva"]),
                                  budget=int(arguments.get("budget", 8192)))
+
+    if name == "binary_function_strings":
+        from fridapilot.tools.pe_rva import function_strings
+        parsed: list[tuple[int, int | None]] = []
+        for spec in arguments.get("ranges", []):
+            text = str(spec)
+            if "-" in text:
+                lo, _, hi = text.partition("-")
+                begin, end = int(lo, 0), int(hi, 0)
+                if end <= begin:
+                    raise ValueError(f"range {text!r} ends at or before it starts")
+                parsed.append((begin, end))
+            else:
+                parsed.append((int(text, 0), None))
+        return function_strings(arguments["binary_path"], parsed,
+                                budget=int(arguments.get("budget", 0)),
+                                min_len=int(arguments.get("min_len", 4)),
+                                limit=int(arguments.get("limit", 0)))
+
+    if name == "binary_strings_in_range":
+        from fridapilot.tools.pe_rva import strings_in_range
+        start = int(arguments.get("start_rva", 0) or 0)
+        end = int(arguments.get("end_rva", 0) or 0)
+        return strings_in_range(arguments["binary_path"],
+                                start_rva=start or None, end_rva=end or None,
+                                section=str(arguments.get("section", "")),
+                                min_len=int(arguments.get("min_len", 4)),
+                                encoding=str(arguments.get("encoding", "ascii")),
+                                limit=int(arguments.get("limit", 5000)),
+                                contains=str(arguments.get("contains", "")))
 
     if name == "binary_callees":
         from fridapilot.tools.pe_rva import function_callees

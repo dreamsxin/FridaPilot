@@ -303,6 +303,8 @@ def _actual_keys(name: str, path: str) -> set[str]:
         "field_refs": lambda: None,
         "function_bounds": lambda: pe_rva.function_bounds(path, TEXT_RVA),
         "describe_function": lambda: pe_rva.describe_function(path, TEXT_RVA),
+        "function_strings": lambda: pe_rva.function_strings(path, [(TEXT_RVA, None)]),
+        "strings_in_range": lambda: pe_rva.strings_in_range(path, section=".rdata"),
         "function_callees": lambda: pe_rva.function_callees(path, TEXT_RVA)[0],
         "disassemble_rva": lambda: pe_rva.disassemble_rva(path, TEXT_RVA, 1),
         "map_refs_to_functions": lambda: pe_rva.map_refs_to_functions(

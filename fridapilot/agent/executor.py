@@ -101,6 +101,8 @@ def _register_tools() -> None:
         "pe_rva.function_xrefs": pe_rva.function_xrefs,
         "pe_rva.vtable_of_function": pe_rva.vtable_of_function,
         "pe_rva.describe_function": pe_rva.describe_function,
+        "pe_rva.function_strings": pe_rva.function_strings,
+        "pe_rva.strings_in_range": pe_rva.strings_in_range,
         "pe_rva.function_callees": pe_rva.function_callees,
         "pe_rva.field_refs": pe_rva.field_refs,
         "pe_rva.map_refs_to_functions": pe_rva.map_refs_to_functions,
