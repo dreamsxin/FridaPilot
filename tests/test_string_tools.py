@@ -12,6 +12,7 @@ independently, never from recording what the code printed.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -81,8 +82,37 @@ def test_the_default_budget_is_the_whole_range_up_to_the_cap(pe_image):
     path, _placed, _end = pe_image
     huge = sp.TEXT_RVA + MAX_FUNCTION_SPAN + 0x1000
     entry = function_strings(path, [(sp.TEXT_RVA, huge)])["ranges"][0]
-    assert entry["decoded_bytes"] == MAX_FUNCTION_SPAN
+    assert entry["decoded_bytes"] < MAX_FUNCTION_SPAN     # clamped by the section end too
     assert entry["complete"] is False
+
+
+def test_a_range_that_could_not_be_read_is_never_reported_as_complete(pe_image):
+    """decoded_bytes must come from the bytes read, not from the bytes requested.
+
+    read_rva returns None for an unmapped RVA and truncates at the section end, so
+    deriving decoded_bytes from the request reported full coverage of a range that was
+    never decoded - the exact failure this function was written to avoid, reproduced
+    inside it.
+    """
+    path, _placed, _end = pe_image
+    view = PEImage(path)
+    text_end = max(e for _n, _s, e in view.code_sections())
+
+    unmapped = function_strings(path, [(0x7F000000, 0x7F001000)])["ranges"][0]
+    assert unmapped["decoded_bytes"] == 0
+    assert unmapped["complete"] is False
+    assert any("0 of" in note for note in
+               function_strings(path, [(0x7F000000, 0x7F001000)])["notes"])
+
+    crossing = function_strings(path, [(text_end - 0x40, text_end + 0x4000)])["ranges"][0]
+    assert crossing["decoded_bytes"] <= 0x40
+    assert crossing["complete"] is False
+
+    empty = function_strings(path, [(sp.TEXT_RVA, sp.TEXT_RVA)])
+    assert empty["ranges"][0]["complete"] is False
+    assert any("empty range" in note for note in empty["notes"])
+    assert "every range decoded end to end" not in empty["notes"]
+
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="needs a real x64 PE from Windows")
@@ -140,6 +170,7 @@ def test_an_explicit_range_is_honoured_and_rows_stay_inside_it(pe_image):
 
 
 def test_min_len_and_a_bad_section_name(pe_image):
+    """min_len filters, and a nonexistent section is an error rather than an empty list."""
     path, _placed, _end = pe_image
     long_only = strings_in_range(path, section=".rdata", min_len=17)
     assert all(row["length"] >= 17 for row in long_only["strings"])
@@ -149,6 +180,31 @@ def test_min_len_and_a_bad_section_name(pe_image):
         strings_in_range(path, section=".nope")
     with pytest.raises(ValueError, match="pass a section name"):
         strings_in_range(path)
+
+
+def test_an_out_of_band_min_len_is_refused_not_interpolated(pe_image):
+    """min_len goes into a regex quantifier, so an absurd value must not reach re.compile.
+
+    `{0,}` matches zero-width and yields a row per byte; `{-1,}` is parsed as a literal
+    and silently matches almost nothing; a huge value makes re.compile raise
+    OverflowError, which is not a ValueError and so escaped the CLI as a traceback.
+    """
+    path, _placed, _end = pe_image
+    for bad in (0, -1, 1 << 33):
+        with pytest.raises(ValueError, match="min_len must be"):
+            strings_in_range(path, section=".rdata", min_len=bad)
+
+
+def test_contains_filters_inside_the_scan_and_encodings_are_reported(pe_image):
+    """Filtering in the scan is what keeps a one-keyword query from building every row."""
+    path, _placed, _end = pe_image
+    hit = strings_in_range(path, section=".rdata", contains="fridapilotmarker")
+    assert [row["text"] for row in hit["strings"]] == [sp.MARKER_TEXT]
+    assert hit["encodings_scanned"] == ["ascii"]
+    assert strings_in_range(path, section=".rdata", contains="no-such-text")["count"] == 0
+    both = strings_in_range(path, section=".rdata", encoding="all")
+    assert both["encodings_scanned"] == ["ascii", "utf16le"]
+
 
 
 # ── find_string_rvas: the address code actually references ────
@@ -211,7 +267,38 @@ def test_the_tool_layer_accepts_an_alias_wherever_it_takes_a_path(pe_image, stor
     assert strings_in_range("@synth", section=".rdata")["count"] > 0
 
 
-def test_argv_expansion_only_touches_defined_aliases(pe_image, store):
+def test_an_alias_cannot_carry_a_path_past_the_mcp_whitelist(pe_image, store, tmp_path,
+                                                             monkeypatch):
+    """The MCP whitelist has to see the resolved path, not the alias spelling.
+
+    _dispatch validated the raw argument, and the tool layer expanded the alias
+    afterwards: with the server's cwd inside FRIDAPILOT_ALLOWED_DIRS, "@x" passed the
+    check as "<cwd>/@x" and then opened whatever the alias pointed at. The mirror-image
+    bug is just as bad - with the cwd outside, aliases could never work on MCP at all,
+    which is the opposite of what the docs promise.
+    """
+    pytest.importorskip("mcp")
+    from fridapilot.mcp import server
+
+    path, _placed, _end = pe_image                 # lives in tmp_path
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.chdir(allowed)
+    monkeypatch.setenv("FRIDAPILOT_ALLOWED_DIRS", str(allowed))
+    server._get_allowed_dirs.cache_clear() if hasattr(
+        server._get_allowed_dirs, "cache_clear") else None
+    add_target("outside", path)
+
+    denied = server._dispatch("binary_analyze_pe", {"binary_path": "@outside"})
+    assert denied["success"] is False
+    assert "outside allowed directories" in denied["error"]
+
+    inside = allowed / "copy.exe"
+    inside.write_bytes(Path(path).read_bytes())
+    add_target("inside", inside)
+    ok = server._dispatch("binary_analyze_pe", {"binary_path": "@inside"})
+    assert ok["success"] is True, ok
+
     """The CLI rewrite must not eat an argument that merely starts with '@'."""
     from fridapilot.cli.main import expand_target_aliases
 

@@ -99,9 +99,19 @@ def _dispatch(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """
     start = _time.time()
     try:
+        from fridapilot.tools.targets import resolve_target
+
         for key in PATH_ARGUMENTS:
             value = arguments.get(key)
             if isinstance(value, str) and value:
+                # Resolve "@alias" BEFORE the whitelist sees it. Checking the raw string
+                # validated "<cwd>/@alias" and the tool layer then expanded the alias to
+                # whatever absolute path the user had registered — so with the cwd inside
+                # FRIDAPILOT_ALLOWED_DIRS a client could reach a file outside it, and with
+                # the cwd outside, aliases never worked here at all. Rewriting the
+                # argument also means the tool and the audit entry record the real path.
+                value = str(resolve_target(value))
+                arguments[key] = value
                 _check_path_allowed(value)
         result = _handle_tool(name, arguments)
         _audit_log(name, arguments)

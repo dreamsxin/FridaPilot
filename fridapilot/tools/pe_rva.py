@@ -680,10 +680,15 @@ def function_strings(
                 end = begin + 8192
         span = max(end - begin, 0)
         allowed = min(span, budget or MAX_FUNCTION_SPAN)
+        # What was actually readable, not what was requested. read_rva returns None for
+        # an unmapped RVA and truncates at the section end, so deriving decoded_bytes
+        # from `allowed` reported full coverage of a range that was never decoded -
+        # exactly the failure this function exists to avoid.
+        available = len(img.read_rva(begin, allowed) or b"")
         rows: list[dict[str, Any]] = []
         seen: set[tuple[int, int | None]] = set()
         truncated = False
-        for insn in _decode_body(img, md, begin, begin + allowed, allowed):
+        for insn in _decode_body(img, md, begin, begin + available, available):
             hits: list[tuple[int | None, str, str]] = []
             for op in insn.operands:
                 if op.type != cx86.X86_OP_MEM or op.mem.base != cx86.X86_REG_RIP:
@@ -719,14 +724,20 @@ def function_strings(
         out_ranges.append({
             "begin_rva": begin, "end_rva": end, "size": span,
             "has_bounds": has_bounds,
-            "decoded_bytes": allowed, "complete": allowed >= span and not truncated,
+            "decoded_bytes": available,
+            "complete": available >= span and span > 0 and not truncated,
             "truncated": truncated, "count": len(rows), "strings": rows,
         })
         total += len(rows)
-        if allowed < span:
+        if span <= 0:
+            notes.append(f"0x{begin:x}: empty range (end <= begin), nothing decoded")
+        elif available < span:
             notes.append(
-                f"0x{begin:x}: decoded {allowed} of {span} bytes - raise budget "
-                f"(cap {MAX_FUNCTION_SPAN}) or the tail is unexamined")
+                f"0x{begin:x}: decoded {available} of {span} bytes - raise budget "
+                f"(cap {MAX_FUNCTION_SPAN}), or the range leaves the section / has no "
+                f"file data and the tail is unexamined")
+        if truncated:
+            notes.append(f"0x{begin:x}: stopped at the {limit}-row limit")
     if not notes:
         notes.append("every range decoded end to end")
     return {"path": str(binary_path), "ranges": out_ranges, "total": total, "notes": notes}
@@ -739,7 +750,8 @@ def strings_in_range(
     section: str = "",
     min_len: int = 4,
     encoding: str = "ascii",
-    limit: int = 0,
+    limit: int = 5000,
+    contains: str = "",
 ) -> dict[str, Any]:
     """Strings inside one RVA range or section, keyed by RVA.
 
@@ -756,12 +768,22 @@ def strings_in_range(
         section: section name; overrides start/end when given.
         start_rva/end_rva: explicit range (RVAs, not file offsets).
         encoding: ``ascii``, ``utf16le`` or ``all``.
-        limit: max rows; 0 means unlimited.
+        limit: max rows; 0 means unlimited. The default is deliberately finite: a 64 MB
+            data section yields hundreds of thousands of rows, each one sorted and then
+            serialised, which a caller reads as a hang.
+        contains: case-insensitive substring filter applied *inside* the scan, so
+            non-matching runs never become rows. Filtering after the fact costs the full
+            result set even for a one-keyword query.
 
     Returns:
         {path, section, start_rva, end_rva, scanned_bytes, complete, count, truncated,
-        strings: [{rva, offset, encoding, length, terminated, text}]}
+        encodings_scanned, strings: [{rva, offset, encoding, length, terminated, text}]}
     """
+    if not 1 <= min_len <= 4096:
+        # The value is interpolated into a regex quantifier: 0 makes it zero-width (a row
+        # per byte), a negative number turns `{-1,}` into a literal that silently matches
+        # almost nothing, and a huge one makes re.compile raise OverflowError.
+        raise ValueError(f"min_len must be between 1 and 4096, got {min_len}")
     img = PEImage(binary_path)
     if section:
         found = img.section_range(section)
@@ -788,12 +810,18 @@ def strings_in_range(
     if not patterns:
         raise ValueError(f"unknown encoding {encoding!r} (ascii, utf16le, all)")
 
+    needle = contains.lower() if contains else ""
+    scanned_encodings: list[str] = []
     for enc, pattern in patterns:
+        scanned_encodings.append(enc)
         for m in pattern.finditer(data):
             if limit and len(rows) >= limit:
                 truncated = True
                 break
             raw = m.group()
+            text = (raw.decode("utf-16-le") if enc == "utf16le" else raw.decode("ascii"))
+            if needle and needle not in text.lower():
+                continue
             tail = data[m.end():m.end() + (2 if enc == "utf16le" else 1)]
             rva = start_rva + m.start()
             rows.append({
@@ -802,17 +830,20 @@ def strings_in_range(
                 "encoding": enc,
                 "length": len(raw) // 2 if enc == "utf16le" else len(raw),
                 "terminated": tail.startswith(b"\0"),
-                "text": (raw.decode("utf-16-le") if enc == "utf16le"
-                         else raw.decode("ascii")),
+                "text": text,
             })
         if truncated:
+            # Say which encodings were actually examined: coming back with no utf16le
+            # rows because the ascii pass used up the limit looks exactly like "this
+            # image has no wide strings".
             break
     rows.sort(key=lambda r: r["rva"])
     return {
         "path": str(binary_path), "section": section,
         "start_rva": start_rva, "end_rva": end_rva,
         "scanned_bytes": len(data), "complete": len(data) >= span and not truncated,
-        "count": len(rows), "truncated": truncated, "strings": rows,
+        "count": len(rows), "truncated": truncated,
+        "encodings_scanned": scanned_encodings, "strings": rows,
     }
 
 

@@ -1505,11 +1505,18 @@ def metadata_cmd(
 
 
 def _parse_range(spec: str) -> tuple[int, int | None]:
-    """"0xA-0xB" -> (A, B); "0xA" -> (A, None) meaning "resolve bounds from .pdata"."""
+    """Parse `0xA-0xB` into (A, B), or `0xA` into (A, None) = bounds from .pdata.
+
+    Addresses go through int(x, 0) like every other address argument in this file, so
+    `0x1000` and `4096` mean the same thing here as they do in `xrefs-rva`.
+    """
     if "-" in spec:
         lo, _, hi = spec.partition("-")
-        return int(lo, 16), int(hi, 16)
-    return int(spec, 16), None
+        begin, end = int(lo, 0), int(hi, 0)
+        if end <= begin:
+            raise ValueError(f"range {spec!r} ends at or before it starts")
+        return begin, end
+    return int(spec, 0), None
 
 
 @binary_app.command("func-strings")
@@ -1587,11 +1594,11 @@ def strings_rva_cmd(
     binary: str = typer.Argument(..., help="Path to a PE file."),
     section: str = typer.Option("", "--section", "-s",
                                 help="Section to scan (.rdata, .data); overrides --start/--end."),
-    start: str = typer.Option("", "--start", help="Start RVA (hex), e.g. 0x10224cd0."),
+    start: str = typer.Option("", "--start", help="Start RVA, e.g. 0x10224cd0."),
     end: str = typer.Option("", "--end", help="End RVA (exclusive)."),
     min_len: int = typer.Option(4, "--min-len", "-m", help="Shortest run reported."),
     encoding: str = typer.Option("ascii", "--encoding", "-e", help="ascii, utf16le or all."),
-    limit: int = typer.Option(0, "--limit", "-l", help="Max rows; 0 = unlimited."),
+    limit: int = typer.Option(5000, "--limit", "-l", help="Max rows; 0 = unlimited."),
     contains: str = typer.Option("", "--contains", "-c", help="Keep rows containing this."),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON."),
 ) -> None:
@@ -1611,25 +1618,23 @@ def strings_rva_cmd(
     try:
         result = strings_in_range(
             binary, section=section,
-            start_rva=int(start, 16) if start else None,
-            end_rva=int(end, 16) if end else None,
-            min_len=min_len, encoding=encoding, limit=limit)
+            start_rva=int(start, 0) if start else None,
+            end_rva=int(end, 0) if end else None,
+            min_len=min_len, encoding=encoding, limit=limit, contains=contains)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
     rows = result["strings"]
-    if contains:
-        rows = [r for r in rows if contains.lower() in r["text"].lower()]
-
     if json_output:
-        _emit_json({**result, "strings": rows, "count": len(rows)})
+        _emit_json(result)
         return
 
     scope = result["section"] or f"0x{result['start_rva']:x}-0x{result['end_rva']:x}"
     done = "" if result["complete"] else " [yellow](truncated)[/yellow]"
     console.print(f"[bold]{scope}[/bold]  {result['scanned_bytes']} bytes scanned  "
-                  f"{len(rows)} strings{done}")
+                  f"{len(rows)} strings{done}  "
+                  f"[dim]encodings: {', '.join(result['encodings_scanned'])}[/dim]")
     table = Table(header_style="bold")
     table.add_column("RVA", style="dim", no_wrap=True)
     table.add_column("Len", justify="right", no_wrap=True)
