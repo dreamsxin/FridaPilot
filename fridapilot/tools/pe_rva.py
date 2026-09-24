@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from fridapilot.tools.binary_analysis import printable_run_pattern
 from fridapilot.tools.targets import resolve_target
 
 logger = logging.getLogger(__name__)
@@ -523,6 +524,34 @@ def _decode_body(img: PEImage, md: Any, begin: int, end: int, budget: int):
             pos += 1
 
 
+def _iter_string_refs(img: PEImage, md: Any, begin: int, end: int, budget: int,
+                      min_len: int = 4, cap: int = 200):
+    """Yield (from_rva, target_rva, text, encoding) for every literal a body reaches.
+
+    One implementation for both callers. It takes an already-open ``img``/``md`` rather
+    than a path on purpose: ``function_callees`` runs this per callee, and re-entering
+    through a path would construct a ``PEImage`` each time — the whole-file read this
+    module warns about.
+
+    ``target_rva`` is None for an inline-constructed string: those characters live in
+    the opcode bytes and there is no address to report.
+    """
+    from capstone import x86 as cx86
+
+    for insn in _decode_body(img, md, begin, end, budget):
+        from_rva = insn.address - img.image_base
+        for op in insn.operands:
+            if op.type != cx86.X86_OP_MEM or op.mem.base != cx86.X86_REG_RIP:
+                continue
+            tgt = insn.address + insn.size + op.mem.disp - img.image_base
+            found = _text_at(img, tgt, min_len=min_len, cap=cap)
+            if found:
+                yield from_rva, tgt, found[0], found[1]
+        imm = _immediate_text(insn, cx86)
+        if imm:
+            yield from_rva, None, imm, "inline"
+
+
 def _function_strings(img: PEImage, md: Any, begin: int, end: int,
                       budget: int = 8192, limit: int = 24):
     """Strings a function reaches, split into source paths / symbols / everything else.
@@ -534,28 +563,19 @@ def _function_strings(img: PEImage, md: Any, begin: int, end: int,
     result is often only the plain strings (measured on one 294 MB release chrome.dll:
     a 981-byte function yielded ``user-data-dir`` and ``protected-cookiesfile`` and no
     source path at all). Both are returned separately instead of pretending one exists.
-    """
-    from capstone import x86 as cx86
 
+    The addressed form of the same scan is ``function_strings``; this one summarises for
+    a one-line label, so it drops the addresses rather than computing them twice.
+    """
     paths: list[str] = []
     symbols: list[str] = []
     other: list[str] = []
-    for insn in _decode_body(img, md, begin, end, budget):
-        for op in insn.operands:
-            if op.type != cx86.X86_OP_MEM or op.mem.base != cx86.X86_REG_RIP:
-                continue
-            tgt = insn.address + insn.size + op.mem.disp - img.image_base
-            found = _text_at(img, tgt)
-            if not found:
-                continue
-            text = found[0]
-            bucket = {"source_path": paths, "symbol": symbols}.get(
-                _classify_text(text), other)
-            if text not in bucket and len(bucket) < limit:
-                bucket.append(text)
-        imm = _immediate_text(insn, cx86)
-        if imm and imm not in other and len(other) < limit:
-            other.append(imm)
+    for _from_rva, _tgt, text, enc in _iter_string_refs(img, md, begin, end, budget):
+        bucket = (other if enc == "inline"
+                  else {"source_path": paths, "symbol": symbols}.get(
+                      _classify_text(text), other))
+        if text not in bucket and len(bucket) < limit:
+            bucket.append(text)
     return paths, symbols, other
 
 
@@ -659,7 +679,6 @@ def function_strings(
         text}]}], total, notes}
     """
     import capstone
-    from capstone import x86 as cx86
 
     img = PEImage(binary_path)
     md = capstone.Cs(capstone.CS_ARCH_X86,
@@ -688,39 +707,23 @@ def function_strings(
         rows: list[dict[str, Any]] = []
         seen: set[tuple[int, int | None]] = set()
         truncated = False
-        for insn in _decode_body(img, md, begin, begin + available, available):
-            hits: list[tuple[int | None, str, str]] = []
-            for op in insn.operands:
-                if op.type != cx86.X86_OP_MEM or op.mem.base != cx86.X86_REG_RIP:
-                    continue
-                tgt = insn.address + insn.size + op.mem.disp - img.image_base
-                found_text = _text_at(img, tgt, min_len=min_len, cap=cap)
-                if found_text:
-                    hits.append((tgt, found_text[0], found_text[1]))
-            imm = _immediate_text(insn, cx86)
-            if imm:
-                # An inline-constructed string has no .rdata copy at all, so there is no
-                # target address to report - the characters are in the opcode bytes.
-                hits.append((None, imm, "inline"))
-            from_rva = insn.address - img.image_base
-            for target_rva, text, enc in hits:
-                key = (from_rva, target_rva)
-                if key in seen:
-                    continue
-                seen.add(key)
-                if limit and len(rows) >= limit:
-                    truncated = True
-                    break
-                rows.append({
-                    "from_rva": from_rva,
-                    "target_rva": target_rva,
-                    "section": img.section_of(target_rva) if target_rva is not None else "",
-                    "encoding": enc,
-                    "kind": "inline" if enc == "inline" else _classify_text(text),
-                    "text": text,
-                })
-            if truncated:
+        for from_rva, target_rva, text, enc in _iter_string_refs(
+                img, md, begin, begin + available, available, min_len=min_len, cap=cap):
+            key = (from_rva, target_rva)
+            if key in seen:
+                continue
+            seen.add(key)
+            if limit and len(rows) >= limit:
+                truncated = True
                 break
+            rows.append({
+                "from_rva": from_rva,
+                "target_rva": target_rva,
+                "section": img.section_of(target_rva) if target_rva is not None else "",
+                "encoding": enc,
+                "kind": "inline" if enc == "inline" else _classify_text(text),
+                "text": text,
+            })
         out_ranges.append({
             "begin_rva": begin, "end_rva": end, "size": span,
             "has_bounds": has_bounds,
@@ -804,9 +807,9 @@ def strings_in_range(
     # through bytes.find. A 32 MB .rdata is 0.1 s here and ~10 s walked in Python.
     patterns = []
     if encoding in ("ascii", "all"):
-        patterns.append(("ascii", re.compile(rb"[\x20-\x7e]{%d,}" % min_len)))
+        patterns.append(("ascii", printable_run_pattern(min_len)))
     if encoding in ("utf16le", "all"):
-        patterns.append(("utf16le", re.compile(rb"(?:[\x20-\x7e]\x00){%d,}" % min_len)))
+        patterns.append(("utf16le", printable_run_pattern(min_len, "utf16le")))
     if not patterns:
         raise ValueError(f"unknown encoding {encoding!r} (ascii, utf16le, all)")
 

@@ -173,6 +173,22 @@ def analyze_elf(filepath: str | Path) -> ELFAnalysis:
     return result
 
 
+def printable_run_pattern(min_len: int, encoding: str = "ascii"):
+    """Compiled pattern matching a printable run of at least ``min_len`` characters.
+
+    Shared with ``pe_rva.strings_in_range`` so the definition of "a string" is one thing:
+    when these classes were duplicated, a change to ``min_len`` semantics or to the
+    accepted byte range only landed in one of the two scanners. A regex is the
+    implementation because a Python byte walk costs ~0.3 s/MB here.
+
+    ``min_len`` is interpolated into a quantifier, so callers must validate it: 0 matches
+    zero-width and a negative number turns ``{-1,}`` into a literal.
+    """
+    if encoding == "utf16le":
+        return re.compile(rb"(?:[\x20-\x7e]\x00){%d,}" % min_len)
+    return re.compile(rb"[\x20-\x7e]{%d,}" % min_len)
+
+
 def capstone_for(arch: str, detail: bool = False):
     """Configured capstone engine for an arch name (``x86``/``x64``/``arm``/``arm64``).
 
@@ -351,7 +367,7 @@ def find_strings(
     results: list[StringMatch] = []
 
     def _extract_ascii(data: bytes) -> list[StringMatch]:
-        pattern = re.compile(rb"[\x20-\x7e]{%d,}" % min_len)
+        pattern = printable_run_pattern(min_len)
         matches = []
         for m in pattern.finditer(data):
             matches.append(StringMatch(
@@ -364,7 +380,7 @@ def find_strings(
         return matches
 
     def _extract_utf16le(data: bytes) -> list[StringMatch]:
-        pattern = re.compile(rb"(?:[\x20-\x7e]\x00){%d,}" % min_len)
+        pattern = printable_run_pattern(min_len, "utf16le")
         matches = []
         for m in pattern.finditer(data):
             try:
