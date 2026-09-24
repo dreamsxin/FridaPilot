@@ -3,6 +3,8 @@
 Register all subcommands via Typer.
 """
 
+from __future__ import annotations
+
 import sys
 
 import typer

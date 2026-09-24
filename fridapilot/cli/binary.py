@@ -1646,5 +1646,3 @@ def strings_rva_cmd(
                       "yes" if row["terminated"] else "[yellow]no[/yellow]",
                       _console_safe(row["text"], 200))
     console.print(table)
-
-

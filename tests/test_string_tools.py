@@ -149,6 +149,7 @@ def test_every_reported_string_really_lives_at_its_target_rva():
 
 
 def test_a_section_scan_finds_the_fixture_marker_with_its_rva(pe_image):
+    """A row is only useful if its RVA and file offset agree with the image itself."""
     path, _placed, _end = pe_image
     result = strings_in_range(path, section=".rdata")
     hit = next(r for r in result["strings"] if r["text"] == sp.MARKER_TEXT)
@@ -161,6 +162,7 @@ def test_a_section_scan_finds_the_fixture_marker_with_its_rva(pe_image):
 
 
 def test_an_explicit_range_is_honoured_and_rows_stay_inside_it(pe_image):
+    """An explicit range must bound the scan, not merely seed it."""
     path, _placed, _end = pe_image
     lo = sp.RDATA_RVA + 0x20
     result = strings_in_range(path, start_rva=lo, end_rva=lo + 0x18)
@@ -233,6 +235,7 @@ def test_a_substring_hit_reports_the_enclosing_string_s_own_rva(pe_image):
 
 
 def test_an_alias_resolves_to_the_stored_path_and_a_plain_path_is_untouched(pe_image, store):
+    """Only "@name" is special; an ordinary path must pass through byte for byte."""
     path, _placed, _end = pe_image
     stored = add_target("synth", path)
     assert list_targets() == {"synth": stored}
@@ -313,6 +316,7 @@ def test_an_alias_cannot_carry_a_path_past_the_mcp_whitelist(pe_image, store, tm
 
 
 def test_cli_commands_are_registered_and_run(pe_image, store):
+    """Both commands must be reachable from the root app, and fail with exit code 1."""
     import json
 
     from typer.testing import CliRunner
